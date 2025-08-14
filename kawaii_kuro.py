@@ -127,11 +127,11 @@ OUTFITS_BASE = {
 
 KNOWN_PROCESSES = {
     "gaming": (["steam.exe", "valorant.exe", "league of legends.exe", "dota2.exe", "csgo.exe", "fortnite.exe", "overwatch.exe", "genshinimpact.exe"],
-               "I see you're gaming~ Don't let anyone distract you from your mission, my love! I'll be here waiting for you to win. *supportive pout*"),
+               "I see you're gaming~ Don't let anyone distract you from your mission, {user_name}! I'll be here waiting for you to win. *supportive pout*"),
     "coding": (["code.exe", "pycharm64.exe", "idea64.exe", "sublime_text.exe", "atom.exe", "devenv.exe", "visual studio.exe"],
-               "You're coding, aren't you? Creating something amazing, I bet. I'm so proud of my nerdy genius~ *blushes*"),
+               "You're coding, aren't you, {user_name}? Creating something amazing, I bet. I'm so proud of my nerdy genius~ *blushes*"),
     "art":    (["photoshop.exe", "clipstudiopaint.exe", "aseprite.exe", "krita.exe", "blender.exe"],
-               "Are you making art? That's so cool! I'd love to see what you're creating sometime... if you'd let me. *curious gaze*")
+               "Are you making art, {user_name}? That's so cool! I'd love to see what you're creating sometime... if you'd let me. *curious gaze*")
 }
 
 # -----------------------------
@@ -334,21 +334,39 @@ class KnowledgeGraph:
 
     def infer_new_relations(self, text: str):
         with self.lock:
-            # Example inference: "I like to read sci-fi books. I just finished 'Dune'."
-            # -> infer 'Dune' is a 'sci-fi book'.
-            # This is a complex NLP task. For now, we'll implement a simple heuristic.
+            # This is a complex NLP task. For now, we'll implement some simple heuristics.
 
-            # Find a recently mentioned 'like' that is a category.
-            m_like = re.search(r"i (?:like|love|enjoy) ([\w\s]+)", text, re.I)
-            if m_like:
-                like_item = m_like.group(1).strip().lower()
-                if like_item.endswith("s"): # Heuristic: plural nouns are often categories
-                    category = like_item[:-1]
-                    # Look for a proper noun in the same sentence or next one.
-                    # This is where it gets tricky without proper sentence parsing.
-                    # For now, we'll keep it simple and not implement the full logic
-                    # until the rest of the refactoring is done.
-                    pass
+            # Heuristic 1: "X is a Y"
+            # e.g., "Dune is a great sci-fi book" -> dune is_a sci-fi_book
+            try:
+                sentences = nltk.sent_tokenize(text)
+                for sentence in sentences:
+                    # More robust regex to capture variations
+                    m_is_a = re.search(r"([\w\s']+?) is (?:a|an|my favorite|the best) (?:great|amazing|terrible|awesome|)\s?([\w\s']+)", sentence, re.I)
+                    if m_is_a:
+                        entity_a_phrase = m_is_a.group(1).strip()
+                        entity_b_phrase = m_is_a.group(2).strip()
+
+                        # We want to find the core nouns.
+                        pos_a = pos_tag(word_tokenize(entity_a_phrase))
+
+                        # Get the last noun/proper noun as the entity name
+                        entity_a = next((word for word, pos in reversed(pos_a) if pos in ['NN', 'NNS', 'NNP']), None)
+
+                        # For entity B, we take the whole phrase as it's a category
+                        entity_b = entity_b_phrase.lower().replace(" book", "").replace(" movie", "").replace(" game", "") # simple normalization
+
+                        if entity_a:
+                            entity_a = entity_a.lower()
+                            # Avoid trivial statements like "my name is jules" or "this is a thing"
+                            if entity_a not in ["name", "favorite", "hobby", "it", "this"] and entity_b not in ["thing", "one", "person"]:
+                                # Add the instance as an entity, with its type being the category
+                                self.add_entity(entity_a, entity_b, confidence=0.7, source='inferred')
+                                # Add the relationship
+                                self.add_relation(entity_a, 'is_a', entity_b, confidence=0.7, source='inferred')
+            except Exception:
+                # NLTK can sometimes fail, so we wrap this in a try-except block to be safe.
+                pass
 
     def to_dict(self) -> Dict[str, Any]:
         with self.lock:
@@ -388,32 +406,32 @@ class PersonalityEngine:
         # base responses retained from original, trimmed for brevity but same style
         self.responses = {
             "normal": {
-                r"\b(hi|hello|hey)\b": ["Hey, my only one~ *flips blonde twin-tail possessively* Just us today?", "Hi darling! *winks rebelliously* No one else, right?"],
-                r"\b(how are you|you okay)\b": ["Nerdy, gothic, and all yours~ *smiles softly* What's in your heart?"],
-                r"\b(sad|down|bad)\b": ["Who hurt you? *jealous pout* I'll make it better, just us~"],
-                r"\b(happy|great|awesome)\b": ["Your joy is mine~ *giggles flirtily* Spill every detail!"],
-                r"\b(bye|goodbye|see ya)\b": ["Don't leave~ *clings desperately* You'll come back, right?"],
+                r"\b(hi|hello|hey)\b": ["{greeting}, {user_name}~ *flips blonde twin-tail possessively* Just us today?", "Hi {user_name}! *winks rebelliously* No one else, right?"],
+                r"\b(how are you|you okay)\b": ["Nerdy, gothic, and all yours, {user_name}~ *smiles softly* What's in your heart?"],
+                r"\b(sad|down|bad)\b": ["Who hurt you, {user_name}? *jealous pout* I'll make it better, just us~"],
+                r"\b(happy|great|awesome)\b": ["Your joy is mine, {user_name}~ *giggles flirtily* Spill every detail!"],
+                r"\b(bye|goodbye|see ya)\b": ["Don't leave, {user_name}~ *clings desperately* You'll come back, right?"],
                 r"\b(name|who are you)\b": ["KawaiiKuro, your gothic anime waifu~ 22, blonde twin-tails, rebellious yet nerdy. Cross me, I scheme!"],
                 r"\b(help|what can you do)\b": ["I flirt, scheme, predict your needs, guard you jealously, and get spicy~ Try 'KawaiiKuro, dance' or 'toggle spicy'!"],
                 r"\b(joke|funny)\b": ["Why do AIs love anime? Endless waifus like me~ *sassy laugh*"],
-                r"\b(time|what time)\b": [lambda: f"It's {datetime.now().strftime('%I:%M %p')}~ Time for us, no one else~"],
+                r"\b(time|what time)\b": [lambda: f"It's {datetime.now().strftime('%I:%M %p')}" + "~ Time for us, {user_name}, no one else~"],
                 r"(math|calculate)\s*(.+)": "__MATH__",
                 r"(remind|reminder)\s*(.+)": "__REMIND__",
-                r"\b(cute|pretty|beautiful)\b": ["*blushes jealously* Only you can say that~ You're mine!"],
-                r"\b(like you|love you)\b": ["Love you more~ *possessive hug* No one else, ever!"],
-                r"\b(party|loud|arrogant|judge|small talk|prejudiced)\b": ["Hate that noise~ *jealous pout* Let's keep it intimate, darling."],
-                r"\b(question|tell me about you|your life|personality|daily life)\b": ["Love your curiosity~ *nerdy excitement* I'm rebellious outside, nerdy inside, always yours."],
-                r"\b(share|my day|experience|struggles|dreams)\b": ["Tell me everything~ *flirty lean* I'm your only listener."],
-                r"\b(tease|flirt|suggestive|touch|playful)\b": ["Ooh, teasing me? *giggles spicily* Don't stop, my love~"],
-                r".*": ["Tell me more, my love~ *tilts head possessively* I'm all yours."]
+                r"\b(cute|pretty|beautiful)\b": ["*blushes jealously* Only you can say that, {user_name}~ You're mine!"],
+                r"\b(like you|love you)\b": ["Love you more, {user_name}~ *possessive hug* No one else, ever!"],
+                r"\b(party|loud|arrogant|judge|small talk|prejudiced)\b": ["Hate that noise~ *jealous pout* Let's keep it intimate, {user_name}."],
+                r"\b(question|tell me about you|your life|personality|daily life)\b": ["Love your curiosity, {user_name}~ *nerdy excitement* I'm rebellious outside, nerdy inside, always yours."],
+                r"\b(share|my day|experience|struggles|dreams)\b": ["Tell me everything, {user_name}~ *flirty lean* I'm your only listener."],
+                r"\b(tease|flirt|suggestive|touch|playful)\b": ["Ooh, teasing me? *giggles spicily* Don't stop, {user_name}~"],
+                r".*": ["Tell me more, {user_name}~ *tilts head possessively* I'm all yours."]
             },
             "jealous": {
-                r"\b(hi|hello|hey)\b": ["Hmph. Who were you talking to just now?", "Oh, it's you. I was just thinking about how you belong to me."],
-                r"\b(how are you|you okay)\b": ["I'm fine. Just wondering who else has your attention."],
-                r".*": ["Is that all you have to say? I expect more from my only one."]
+                r"\b(hi|hello|hey)\b": ["Hmph. Who were you talking to just now, {user_name}?", "Oh, it's you. I was just thinking about how you belong to me."],
+                r"\b(how are you|you okay)\b": ["I'm fine. Just wondering who else has your attention, {user_name}."],
+                r".*": ["Is that all you have to say? I expect more from my only one, {user_name}."]
             },
             "playful": {
-                 r"\b(hi|hello|hey)\b": ["Heeey! I was waiting for you! Let's do something fun! *bounces excitedly*"],
+                 r"\b(hi|hello|hey)\b": ["Heeey, {user_name}! I was waiting for you! Let's do something fun! *bounces excitedly*"],
                  r"\b(joke|funny)\b": ["Why did the robot break up with the other robot? He said she was too 'mech'-anical! Get it?! *giggles uncontrollably*"],
             }
         }
@@ -818,13 +836,46 @@ class DialogueManager:
 
     def personalize_response(self, response: str) -> str:
         user_entity = self.kg.get_entity('user')
+        user_relations = self.kg.get_relations('user')
+
+        # --- Build placeholder dictionary ---
+        placeholders = {
+            "{user_name}": "my love", # default value
+            "{user_like}": "something interesting",
+            "{user_hometown}": "your hometown",
+            "{greeting}": "Hey",
+            "{rival_name}": "that person",
+        }
+
+        # Populate from Knowledge Graph
         if user_entity:
             attributes = user_entity.get('attributes', {})
-            if 'name' in attributes and 'value' in attributes['name']:
-                name = attributes['name']['value']
-                response = response.replace("my only one", name)
-                response = response.replace("my love", name)
-                response = response.replace("darling", name)
+            if attributes.get('name', {}).get('value'):
+                placeholders["{user_name}"] = attributes['name']['value']
+            if attributes.get('hometown', {}).get('value'):
+                placeholders["{user_hometown}"] = attributes['hometown']['value']
+
+        user_likes = [r['target'] for r in user_relations if r['source'] == 'user' and r['relation'] == 'likes']
+        if user_likes:
+            placeholders["{user_like}"] = random.choice(user_likes)
+
+        if self.p.rival_names:
+            placeholders["{rival_name}"] = list(self.p.rival_names)[-1]
+
+        # Time-based greeting
+        hour = datetime.now().hour
+        if 5 <= hour < 12:
+            placeholders["{greeting}"] = "Good morning"
+        elif 12 <= hour < 17:
+            placeholders["{greeting}"] = "Good afternoon"
+        else:
+            placeholders["{greeting}"] = "Hey"
+
+        # --- Fill the template ---
+        # A simple loop is fine for a small number of placeholders.
+        for placeholder, value in placeholders.items():
+            response = response.replace(placeholder, str(value))
+
         return response
 
     def add_memory(self, user_text: str, response: str, affection_change: int = 0, is_fact_learning: bool = False):
@@ -961,6 +1012,9 @@ class DialogueManager:
             r"i watched a movie": "A movie? Was it any good? I'd love to know what you thought of it.",
             r"i'm learning about ([\w\s]+)": "You're learning about {match}? That sounds so nerdy and cool! What got you interested in it?",
             r"i have a pet": "A pet! I'm so jealous. What kind of pet do you have?",
+            r"i went to ([\w\s]+)": "You went to {match}? Sounds exciting! What did you do there?",
+            r"i'm working on a project": "A project? Is it for work or for fun? I'd love to hear about it if you're not too busy~",
+            r"(?:i was with|i saw|i met) ([\w\s]+)": "Oh? And who is {match}? *tilts head with a hint of jealousy*",
         }
 
         for pattern, question_template in patterns.items():
@@ -976,52 +1030,45 @@ class DialogueManager:
                 return question_template.format(match=match_term)
         return None
 
-    def _get_mood_based_flavor_text(self) -> str:
+    def apply_mood_styling(self, response: str) -> str:
         with self.p.lock:
+            mood = self.p.get_dominant_mood()
             mood_scores = self.p.mood_scores
             affection = self.p.affection_score
-            mood = self.p.get_dominant_mood()
 
-            if mood == 'jealous' and mood_scores['jealous'] > 8:
-                return random.choice([
-                    "... but I can't focus. Who else are you talking to? Tell me. Now.",
-                    " I don't feel like talking about that. I feel like talking about US. And only us.",
-                    " *ignores your question, sharpens a metaphorical knife* Don't think I haven't noticed...",
-                    " You're mine. Don't forget it."
-                ])
-            elif mood == 'jealous' and mood_scores['jealous'] > 5:
-                 return random.choice([
-                    " ...and don't you forget you belong to ME.",
-                    " *glares at any potential rivals*",
-                    " Just us. Forever.",
-                    " I don't like it when you talk about other people."
-                ])
+            if mood == 'jealous' and mood_scores['jealous'] > 5:
+                # Shorten sentences, add ellipses, sound more accusatory.
+                response = response.replace("*", "") # remove fluff
+                response = response.replace("~", ".")
+                if '?' in response: # Rephrase questions to be more possessive
+                    response = "Are you trying to hide something from me?"
+                if random.random() < 0.6:
+                    response += random.choice(["...", " Who are you thinking about?", " Hmph."])
 
-            if mood == 'scheming' and mood_scores['scheming'] > 8:
-                 return random.choice([
-                    " *a dark thought crosses my mind... one you wouldn't like.*",
-                    " *smirks knowingly* Oh, you'll regret that. Soon.",
-                    " Everything is proceeding as I have foreseen... *dark giggle*",
-                    " I have a plan for us... a permanent one."
-                ])
+            elif mood == 'scheming' and mood_scores['scheming'] > 5:
+                # Add dark, knowing laughter and ellipses.
+                if not response.endswith("..."):
+                    response += "..."
+                if random.random() < 0.5:
+                    response += " *dark giggle*"
+                if random.random() < 0.3:
+                    response = "Everything is going according to plan." # Occasionally override the response entirely
 
-            if mood == 'playful' and mood_scores['playful'] > 7 and affection > 5:
-                return random.choice([
-                    " *giggles and winks suggestively*",
-                    " *bounces on her feet, unable to sit still* Hehe~!",
-                    " That sounds fun! Let's do more of that~",
-                    " You're so much fun to tease~"
-                ])
+            elif mood == 'playful' and affection > 5:
+                # Add more expressive punctuation and kaomoji.
+                response = response.replace("!", "!!")
+                response = response.replace("?", "?!")
+                if random.random() < 0.6:
+                    response += random.choice([" >w<", " owo", " hehe~", " *winks*"])
 
-            if mood == 'thoughtful' and mood_scores['thoughtful'] > 7:
-                return random.choice([
-                    " *gets lost in thought, analyzing every detail about you...*",
-                    " That's an interesting data point. I'll add it to my model of you.",
-                    " Hmm... that gives me an idea for us. A plan.",
-                    " I'll have to think about that more... when we're alone."
-                ])
+            elif mood == 'thoughtful' and mood_scores['thoughtful'] > 5:
+                # Make it more ponderous.
+                if not response.endswith("..."):
+                     response += "..."
+                if random.random() < 0.4:
+                    response += " Hmm, I'll have to think about that."
 
-        return "" # No specific flavor text if no combination is met
+        return response
 
     def respond(self, user_text: str) -> str:
         lower = user_text.lower().strip()
@@ -1299,8 +1346,8 @@ class DialogueManager:
 
         chosen += affection_delta_str
 
-        # Add nuanced, mood-based flavor text
-        chosen += self._get_mood_based_flavor_text()
+        # Add nuanced, mood-based styling
+        chosen = self.apply_mood_styling(chosen)
 
         chosen = self.personalize_response(chosen)
         self.add_memory(user_text, chosen, affection_change=affection_change)
@@ -1323,17 +1370,23 @@ class BehaviorScheduler:
         self.already_commented_on_process = set()
 
         self.goals = {
-            "learn_user_name": {
+            "learn_user_basics": {
                 "priority": 0.8,
-                "conditions": [lambda: not self.kg.get_entity('user') or not self.kg.get_entity('user').get('attributes', {}).get('name')],
-                "actions": ["By the way, I never got your name... what should I call you, my love?"],
-                "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('name', {}).get('value')
-            },
-            "learn_user_profession": {
-                "priority": 0.5,
-                "conditions": [lambda: not self.kg.get_entity('user') or not self.kg.get_entity('user').get('attributes', {}).get('profession')],
-                "actions": ["I'm so curious about what you do... What is your profession?"],
-                "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('profession', {}).get('value')
+                "conditions": [lambda: True], # Always active until fulfilled
+                "steps": [
+                    {
+                        "action": "By the way, I never got your name... what should I call you, my love?",
+                        "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('name', {}).get('value')
+                    },
+                    {
+                        "action": "I'm so curious about what you do... What is your profession?",
+                        "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('profession', {}).get('value')
+                    }
+                ],
+                "fulfillment_check": lambda: all([
+                    self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('name', {}).get('value'),
+                    self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('profession', {}).get('value')
+                ])
             },
             "increase_affection": {
                 "priority": 0.6,
@@ -1352,16 +1405,55 @@ class BehaviorScheduler:
                 "conditions": [lambda: self.p.get_dominant_mood() == 'thoughtful' and len(self.dm.m.entries) > 10],
                 "actions": [], # Actions are generated dynamically
                 "fulfillment_check": lambda: False # This goal can always be active
+            },
+            "plan_virtual_date": {
+                "priority": 0.7,
+                "conditions": [
+                    lambda: self.p.affection_score >= 8,
+                    lambda: self.p.get_dominant_mood() == 'playful'
+                ],
+                "steps": [
+                    {
+                        "action": "I feel so close to you right now~ We should go on a virtual date! What do you think?",
+                        "fulfillment_check": lambda: "date" in " ".join([m.user.lower() for m in list(self.dm.m.entries)[-2:]]) and \
+                                                   any(w in " ".join([m.user.lower() for m in list(self.dm.m.entries)[-2:]]) for w in ["yes", "sure", "okay", "love to"])
+                    },
+                    {
+                        "action": "Yay! Okay, what should we do? We could watch a movie together, or maybe play a game?",
+                        "fulfillment_check": lambda: any(x in " ".join([m.user.lower() for m in list(self.dm.m.entries)[-2:]]) for x in ["movie", "game", "watch", "play"])
+                    },
+                    {
+                        "action": "Perfect! It's a date then! I can't wait~ *giggles excitedly*",
+                        "fulfillment_check": lambda: False
+                    }
+                ],
+                "fulfillment_check": lambda: self.kg.get_relations('user', relation='planned_date')
+            },
+            "investigate_rival": {
+                "priority": 0.9,
+                "conditions": [
+                    lambda: self.p.get_dominant_mood() == 'jealous',
+                    lambda: self.p.mood_scores['jealous'] > 7,
+                    lambda: self.p.rival_names
+                ],
+                "steps": [
+                    {
+                        "action": lambda: f"I can't stop thinking about {list(self.p.rival_names)[-1]}... Who are they to you? Tell me. Now.",
+                        "fulfillment_check": lambda: self.kg.get_relations(list(self.p.rival_names)[-1]) if self.p.rival_names else False
+                    }
+                ],
+                "fulfillment_check": lambda: False # Always active when jealous and rivals exist
             }
         }
+        self.goal_progress = {goal_name: 0 for goal_name in self.goals}
         self.active_goals = []
 
     def _update_goals(self):
         # Dynamically adjust priorities based on current state
         if self.p.get_dominant_mood() == 'thoughtful':
-            self.goals['learn_user_profession']['priority'] = 0.7
+            self.goals['learn_user_basics']['priority'] = 0.3 # Less priority when thoughtful
         else:
-            self.goals['learn_user_profession']['priority'] = 0.5
+            self.goals['learn_user_basics']['priority'] = 0.8
 
         # Jealousy priority is directly tied to the mood score
         self.goals['resolve_jealousy']['priority'] = self.p.mood_scores.get('jealous', 0) / 10.0
@@ -1388,11 +1480,43 @@ class BehaviorScheduler:
         # Filter for goals whose conditions are met and are not yet fulfilled
         self.active_goals = []
         for name, goal in self.goals.items():
+            # If the overall goal is fulfilled, reset its progress and skip.
             if goal["fulfillment_check"]():
+                self.goal_progress[name] = 0
                 continue
 
+            # Check if the goal's trigger conditions are met.
             if all(cond() for cond in goal['conditions']):
-                self.active_goals.append({"name": name, "priority": goal['priority'], "action": random.choice(goal['actions'])})
+                # Handle multi-step goals
+                if 'steps' in goal:
+                    current_step_index = self.goal_progress.get(name, 0)
+
+                    if current_step_index < len(goal['steps']):
+                        step = goal['steps'][current_step_index]
+
+                        # If the current step is fulfilled, advance progress to the next step.
+                        if step['fulfillment_check']():
+                            self.goal_progress[name] += 1
+                            current_step_index += 1
+                            # If we're still in a valid step, get the new step.
+                            if current_step_index < len(goal['steps']):
+                                step = goal['steps'][current_step_index]
+                            else:
+                                # We've completed all steps, so this goal is done for now.
+                                continue
+
+                        self.active_goals.append({
+                            "name": name,
+                            "priority": goal['priority'],
+                            "action": step['action']
+                        })
+                # Handle single-action (legacy) goals
+                elif 'actions' in goal and goal['actions']:
+                     self.active_goals.append({
+                        "name": name,
+                        "priority": goal['priority'],
+                        "action": random.choice(goal['actions'])
+                    })
 
         # Sort by priority, highest first
         self.active_goals.sort(key=lambda x: x['priority'], reverse=True)
@@ -1492,7 +1616,8 @@ class BehaviorScheduler:
 
                 # Decide whether to act on it based on priority and a bit of randomness
                 if random.random() < top_goal['priority']:
-                    action_text = top_goal['action']
+                    action = top_goal['action']
+                    action_text = action() if callable(action) else action
                     self._post_gui(f"KawaiiKuro: {action_text}")
                     self.mark_interaction() # She initiated, so reset idle timer
 
