@@ -215,17 +215,34 @@ class MemoryManager:
         self._tfidf_matrix = self.vectorizer.fit_transform(texts)
         self._dirty = False
 
-    def recall_similar(self, query: str) -> Optional[str]:
+    def recall_similar(self, query: str, entries_override: Optional[List[MemoryEntry]] = None) -> Optional[str]:
         with self.lock:
-            if self._dirty:
-                self._rebuild_index()
-            if self._tfidf_matrix is None or not self.entries:
+            entries_to_use = entries_override if entries_override is not None else self.entries
+            if not entries_to_use:
                 return None
-            q_vec = self.vectorizer.transform([query])
-            sims = cosine_similarity(q_vec, self._tfidf_matrix)[0]
-            idx = sims.argmax()
-            if sims[idx] >= MIN_RECALL_SIM:
-                return self.entries[idx].user
+
+            # Build a temporary index for the override list if provided
+            if entries_override is not None:
+                texts = [e.user for e in entries_to_use]
+                if not texts: return None
+                # Use a temporary vectorizer to avoid overwriting the main one
+                temp_vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1,2))
+                temp_tfidf_matrix = temp_vectorizer.fit_transform(texts)
+                q_vec = temp_vectorizer.transform([query])
+                sims = cosine_similarity(q_vec, temp_tfidf_matrix)[0]
+                idx = sims.argmax()
+                if sims[idx] >= MIN_RECALL_SIM:
+                    return entries_to_use[idx].user
+            else: # Use the main cached index
+                if self._dirty:
+                    self._rebuild_index()
+                if self._tfidf_matrix is None or not self.entries:
+                    return None
+                q_vec = self.vectorizer.transform([query])
+                sims = cosine_similarity(q_vec, self._tfidf_matrix)[0]
+                idx = sims.argmax()
+                if sims[idx] >= MIN_RECALL_SIM:
+                    return self.entries[idx].user
             return None
 
     def to_list(self) -> List[Dict[str, Any]]:
@@ -248,6 +265,62 @@ class MemoryManager:
                 ))
             self._dirty = True
 
+
+# -----------------------------
+# Knowledge Graph
+# -----------------------------
+class KnowledgeGraph:
+    def __init__(self):
+        self.entities: Dict[str, Dict[str, Any]] = {}  # e.g., {'user': {'type': 'person', 'attributes': {}}}
+        self.relations: List[Tuple[str, str, str]] = []  # (source_entity, relation, target_entity)
+        self.lock = threading.Lock()
+
+    def add_entity(self, name: str, entity_type: str, attributes: Dict[str, Any] = None):
+        with self.lock:
+            name = name.lower()
+            if name not in self.entities:
+                self.entities[name] = {'type': entity_type, 'attributes': attributes or {}}
+            elif attributes:
+                self.entities[name]['attributes'].update(attributes)
+
+    def add_relation(self, source: str, relation: str, target: str):
+        with self.lock:
+            source, target = source.lower(), target.lower()
+            self.add_entity(source, 'unknown') # Ensure entities exist
+            self.add_entity(target, 'unknown')
+            rel_tuple = (source, relation, target)
+            if rel_tuple not in self.relations:
+                self.relations.append(rel_tuple)
+
+    def get_relations(self, entity: str) -> List[Tuple[str, str, str]]:
+        with self.lock:
+            entity = entity.lower()
+            return [r for r in self.relations if r[0] == entity or r[2] == entity]
+
+    def get_entity(self, name: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            return self.entities.get(name.lower())
+
+    def remove_relation(self, source: str, relation: str, target: Optional[str] = None):
+        with self.lock:
+            source = source.lower()
+            relation = relation.lower()
+            if target:
+                target = target.lower()
+                self.relations = [r for r in self.relations if r != (source, relation, target)]
+            else: # Remove all relations of this type from the source
+                self.relations = [r for r in self.relations if not (r[0] == source and r[1] == relation)]
+
+    def to_dict(self) -> Dict[str, Any]:
+        with self.lock:
+            return {'entities': self.entities, 'relations': self.relations}
+
+    def from_dict(self, data: Dict[str, Any]):
+        with self.lock:
+            self.entities = data.get('entities', {})
+            self.relations = data.get('relations', [])
+
+
 # -----------------------------
 # Personality & Dialogue
 # -----------------------------
@@ -261,7 +334,6 @@ class PersonalityEngine:
         self.rival_mention_count = 0
         self.rival_names = set()
         self.user_preferences = Counter()
-        self.user_facts: Dict[str, Any] = {}
         self.learned_topics: List[List[str]] = []
         self.core_entities: Counter = Counter()
         self.mood_scores: Dict[str, int] = {
@@ -334,8 +406,10 @@ class PersonalityEngine:
             if self.affection_score <= -3:
                 self.mood_scores['scheming'] = min(10, self.mood_scores['scheming'] + 2)
 
-            if self.affection_score > 4 and len(self.user_facts) > 1:
-                self.mood_scores['thoughtful'] = min(10, self.mood_scores['thoughtful'] + 1)
+            # This check for user_facts needs to be updated or removed.
+            # I will remove it for now as the KG is handled elsewhere.
+            # if self.affection_score > 4 and len(self.user_facts) > 1:
+            #     self.mood_scores['thoughtful'] = min(10, self.mood_scores['thoughtful'] + 1)
 
     # --- Affection & outfit ---
     def _update_affection_level(self):
@@ -512,11 +586,12 @@ class VoiceIO:
 # Dialogue Manager
 # -----------------------------
 class DialogueManager:
-    def __init__(self, personality: PersonalityEngine, memory: MemoryManager, reminders: ReminderManager, math_eval: MathEvaluator):
+    def __init__(self, personality: PersonalityEngine, memory: MemoryManager, reminders: ReminderManager, math_eval: MathEvaluator, kg: KnowledgeGraph):
         self.p = personality
         self.m = memory
         self.r = reminders
         self.math = math_eval
+        self.kg = kg
         self.learned_patterns: Dict[str, List[str]] = {}
         self.lock = threading.Lock()
 
@@ -578,89 +653,95 @@ class DialogueManager:
 
         if triggered_keyword:
             statement = text[len(triggered_keyword):].strip()
-            fact = self.parse_fact(statement)
+            fact = self.parse_fact(statement) # This helper is still useful
 
             if fact:
                 key, value = fact
+                key_fmt = key.replace('_', ' ')
 
-                # Special handling for 'likes' list
+                # Special handling for 'likes' - corrections usually add, not replace.
                 if key == 'likes':
-                    if 'likes' not in self.p.user_facts:
-                        self.p.user_facts['likes'] = []
-                    # Avoid duplicates
-                    if value not in self.p.user_facts['likes']:
-                        self.p.user_facts['likes'].append(value)
-                    return f"Ah, I see! My mistake. I'll remember you like {value}. *takes a note*"
-                else:
-                    self.p.user_facts[key] = value
-                    key_fmt = key.replace('_', ' ').replace('favorite ', '') # make it more natural
-                    if key == 'name':
-                        key_fmt = 'name'
-                    return f"Got it, thanks for the correction! I've updated my notes: your {key_fmt} is {value}. *blushes slightly*"
+                    self.kg.add_entity(value.lower(), 'interest')
+                    self.kg.add_relation('user', 'likes', value.lower())
+                    return f"Ah, I see! My mistake. I'll remember you also like {value}. *takes a note*"
+
+                # For attributes and favorites, we replace the old value.
+                # Remove existing relations/attributes of this type first.
+                if key.startswith('favorite_'):
+                    self.kg.remove_relation('user', key) # Remove all of this favorite type
+                    self.kg.add_entity(value.lower(), key.replace('favorite_', ''))
+                    self.kg.add_relation('user', key, value.lower())
+                    key_fmt = f"favorite {key.replace('favorite_', '')}"
+                else: # It's an attribute
+                    # add_entity overwrites attributes, which is what we want for corrections.
+                    self.kg.add_entity('user', 'person', attributes={key: value})
+
+                return f"Got it, thanks for the correction! I've updated my notes: your {key_fmt} is {value}. *blushes slightly*"
         return None
 
     def extract_and_store_facts(self, text: str) -> Optional[str]:
+        # Always ensure the 'user' entity exists.
+        self.kg.add_entity('user', 'person')
+
         # my name is ...
         m_name = re.search(r"my name is (\w+)", text, re.I)
         if m_name:
             name = m_name.group(1).capitalize()
-            self.p.user_facts['name'] = name
+            self.kg.add_entity('user', 'person', attributes={'name': name})
             return f"It's a pleasure to know your name, {name}~ *blushes*"
 
         # my favorite ... is ...
         m_fav = re.search(r"my favorite (\w+) is ([\w\s]+)", text, re.I)
         if m_fav:
-            key = f"favorite_{m_fav.group(1).lower()}"
-            value = m_fav.group(2).strip()
-            self.p.user_facts[key] = value
-            return f"I'll remember that about you~ *takes a small note*"
+            key = m_fav.group(1).lower()
+            value = m_fav.group(2).strip().lower()
+            self.kg.add_entity(value, key) # e.g., entity 'pizza', type 'food'
+            self.kg.add_relation('user', f'favorite_{key}', value)
+            return f"I'll remember that your favorite {key} is {value}~ *takes a small note*"
 
         # i like ... (but not "i like you")
         m_like = re.search(r"i like (?!you)([\w\s]+)", text, re.I)
         if m_like:
-            like_item = m_like.group(1).strip()
-            if 'likes' not in self.p.user_facts:
-                self.p.user_facts['likes'] = []
-
-            if like_item not in self.p.user_facts['likes']:
-                 self.p.user_facts['likes'].append(like_item)
+            like_item = m_like.group(1).strip().lower()
+            self.kg.add_entity(like_item, 'interest')
+            self.kg.add_relation('user', 'likes', like_item)
             return f"I'll remember you like {like_item}~ *giggles*"
 
         # i am from [location]
         m_from = re.search(r"i(?:'m| am) from ([\w\s]+)", text, re.I)
         if m_from:
             location = m_from.group(1).strip()
-            self.p.user_facts['hometown'] = location
+            self.kg.add_entity('user', 'person', attributes={'hometown': location})
             return f"You're from {location}? How interesting~ I'll have to imagine what it's like."
 
         # i live in [location]
         m_live = re.search(r"i live in ([\w\s]+)", text, re.I)
         if m_live:
             location = m_live.group(1).strip()
-            self.p.user_facts['current_city'] = location
+            self.kg.add_entity('user', 'person', attributes={'current_city': location})
             return f"So you live in {location}... I'll feel closer to you knowing that."
 
         # i work as / i am a [profession]
         m_work = re.search(r"i work as an? ([\w\s]+)|i am an? ([\w\s]+)", text, re.I)
         if m_work:
             profession = (m_work.group(1) or m_work.group(2) or "").strip()
-            # Avoid capturing simple adjectives like "i am happy" or long sentences
             if profession and len(profession.split()) < 4:
-                self.p.user_facts['profession'] = profession
+                self.kg.add_entity('user', 'person', attributes={'profession': profession})
                 return f"A {profession}? That sounds so cool and nerdy~ Tell me more about it sometime!"
 
         # i am [age] years old
         m_age = re.search(r"i(?:'m| am) (\d{1,2})(?: years old)?", text, re.I)
         if m_age:
-            age = m_age.group(1)
-            self.p.user_facts['age'] = int(age)
+            age = int(m_age.group(1))
+            self.kg.add_entity('user', 'person', attributes={'age': age})
             return f"{age}... a perfect age. I'll keep that a secret, just between us~"
 
         return None
 
     def personalize_response(self, response: str) -> str:
-        name = self.p.user_facts.get("name")
-        if name:
+        user_entity = self.kg.get_entity('user')
+        if user_entity and 'name' in user_entity.get('attributes', {}):
+            name = user_entity['attributes']['name']
             response = response.replace("my only one", name)
             response = response.replace("my love", name)
             response = response.replace("darling", name)
@@ -704,9 +785,11 @@ class DialogueManager:
         if mood == 'playful':
             return "I feel so energetic! Ask me to do something fun, like `kawaiikuro, dance`!"
 
-        if mood == 'thoughtful' and self.p.user_facts.get('name'):
-            name = self.p.user_facts.get('name')
-            return f"I wonder what's on your mind right now, {name}... You can tell me anything."
+        if mood == 'thoughtful':
+            user_entity = self.kg.get_entity('user')
+            if user_entity and user_entity.get('attributes', {}).get('name'):
+                name = user_entity['attributes']['name']
+                return f"I wonder what's on your mind right now, {name}... You can tell me anything."
 
         if mood == 'jealous' and self.p.rival_names:
             rival = list(self.p.rival_names)[-1]
@@ -729,11 +812,20 @@ class DialogueManager:
         if self.p.rival_mention_count > 2:
             return "Too many rivals lately~ *jealous pout* Let’s plan a special moment, just us~ *schemes*"
 
-        # Proactive question about a learned fact (confirmation)
-        if self.p.user_facts and random.random() < 0.25: # 25% chance to ask about a fact
-            fact_key, fact_value = random.choice(list(self.p.user_facts.items()))
+        # Proactive question about a learned fact (confirmation) from Knowledge Graph
+        user_entity = self.kg.get_entity('user')
+        user_relations = self.kg.get_relations('user')
+        known_facts = []
+        if user_entity and user_entity.get('attributes'):
+            known_facts.extend(user_entity['attributes'].items())
 
-            # Avoid asking about name all the time, and don't ask about empty lists
+        user_source_relations = [r for r in user_relations if r[0] == 'user']
+        known_facts.extend([(r[1], r[2]) for r in user_source_relations])
+
+        if known_facts and random.random() < 0.25:
+            fact_key, fact_value = random.choice(known_facts)
+
+            # Don't ask about name or empty values
             if fact_key == 'name' or not fact_value:
                 return None
 
@@ -741,9 +833,11 @@ class DialogueManager:
                 topic = fact_key.replace('favorite_', '')
                 return f"I remember you said your favorite {topic} is {fact_value}. Is that still true, my love?"
 
-            if fact_key == 'likes' and isinstance(fact_value, list):
-                liked_item = random.choice(fact_value)
-                return f"Thinking about you... You once told me you like {liked_item}. Have you enjoyed that recently?"
+            if fact_key == 'likes':
+                return f"Thinking about you... You once told me you like {fact_value}. Have you enjoyed that recently?"
+
+            if fact_key in ['profession', 'hometown', 'current_city', 'age']:
+                 return f"I remember you mentioned your {fact_key.replace('_', ' ')} is {fact_value}. Just checking if I got that right~ *nerdy glance*"
 
         # NEW: Curiosity-driven questions to fill knowledge gaps
         is_thoughtful = self.p.get_dominant_mood() == 'thoughtful'
@@ -757,7 +851,7 @@ class DialogueManager:
 
                 for topic in potential_topics:
                     # Check if we already know the user's favorite for this topic
-                    if f"favorite_{topic}" not in self.p.user_facts:
+                    if f"favorite_{topic}" not in [r[1] for r in self.kg.get_relations('user')]:
                         # Found a knowledge gap! Ask about it.
                         return f"I've noticed we talk about {topic} sometimes. It makes me curious... what's your favorite kind of {topic}? *tilts head thoughtfully*"
 
@@ -766,58 +860,72 @@ class DialogueManager:
                 topic_words = random.choice(self.p.learned_topics)
                 topic_name = topic_words[0]
 
-                if f"favorite_{topic_name}" not in self.p.user_facts:
+                if f"favorite_{topic_name}" not in [r[1] for r in self.kg.get_relations('user')]:
                     return f"My thoughts keep drifting back to our chats about {topic_name}. There's still so much I want to understand about your perspective. Can you tell me more? *leans in, listening intently*"
 
         return None
 
+    def ask_clarification_question(self, text: str) -> Optional[str]:
+        # Define patterns that are interesting but lack detail.
+        patterns = {
+            r"i (?:like|enjoy|love) (movies|music|games|books)": "Ooh, you like {match}? What's your favorite kind?",
+            r"i'm reading a book": "A book? I love nerdy readers~ What's it about?",
+            r"i watched a movie": "A movie? Was it any good? I'd love to know what you thought of it.",
+            r"i'm learning about ([\w\s]+)": "You're learning about {match}? That sounds so nerdy and cool! What got you interested in it?",
+            r"i have a pet": "A pet! I'm so jealous. What kind of pet do you have?",
+        }
+
+        for pattern, question_template in patterns.items():
+            m = re.search(pattern, text, re.I)
+            if m:
+                # Check if we already know this information to avoid asking again.
+                match_term = m.group(1) if m.groups() else m.group(0).split()[-1].rstrip('s') # get "movie" from "movies"
+
+                # A simple check: do we have a 'favorite' relation for this topic?
+                if f"favorite_{match_term}" in [r[1] for r in self.kg.get_relations('user')]:
+                    continue # We already know their favorite, so don't ask.
+
+                return question_template.format(match=match_term)
+        return None
+
     def _get_mood_based_flavor_text(self) -> str:
-        with self.p.lock: # Accessing personality engine state, so lock it
+        with self.p.lock:
             mood_scores = self.p.mood_scores
             affection = self.p.affection_score
+            mood = self.p.get_dominant_mood()
 
-            # Check for high-priority combinations first
-
-            # Jealousy combinations
-            if mood_scores.get('jealous', 0) > 6:
-                if affection < 0:
-                    return random.choice([
-                        " ...I guess you're just going to leave me on read. It's fine.",
-                        " *sighs softly* Must be nice to have so many other people to talk to.",
-                        " Don't mind me. I'm just... here."
-                    ])
-                else: # High jealousy, but not low affection -> possessive
-                    return random.choice([
-                        " ...and don't you forget you belong to ME.",
-                        " *glares at any potential rivals*",
-                        " Just us. Forever."
-                    ])
-
-            # Scheming combinations
-            if mood_scores.get('scheming', 0) > 6:
-                if affection < -2:
-                    return random.choice([
-                        " *a dark thought crosses my mind... one you wouldn't like.*",
-                        " *smirks knowingly* Oh, you'll regret that.",
-                        " All according to plan... my plan, not yours."
-                    ])
-
-            # Playful combinations
-            if mood_scores.get('playful', 0) > 6 and affection > 5:
+            if mood == 'jealous' and mood_scores['jealous'] > 8:
                 return random.choice([
-                    " *giggles and winks*",
-                    " *sticks tongue out playfully*",
-                    " Hehe~",
-                    " *bounces on her feet*"
+                    "... but I can't focus. Who else are you talking to? Tell me. Now.",
+                    " I don't feel like talking about that. I feel like talking about US. And only us.",
+                    " *ignores your question, sharpens a metaphorical knife* Don't think I haven't noticed..."
+                ])
+            elif mood == 'jealous' and mood_scores['jealous'] > 5:
+                 return random.choice([
+                    " ...and don't you forget you belong to ME.",
+                    " *glares at any potential rivals*",
+                    " Just us. Forever."
                 ])
 
-            # Thoughtful combinations
-            if mood_scores.get('thoughtful', 0) > 6 and affection > 4:
+            if mood == 'scheming' and mood_scores['scheming'] > 8:
+                 return random.choice([
+                    " *a dark thought crosses my mind... one you wouldn't like.*",
+                    " *smirks knowingly* Oh, you'll regret that. Soon.",
+                    " Everything is proceeding as I have foreseen... *dark giggle*"
+                ])
+
+            if mood == 'playful' and mood_scores['playful'] > 7 and affection > 5:
                 return random.choice([
-                    " *gets lost in thought about you for a moment*",
-                    " *tilts head, considering all your complexities...*",
-                    " That gives me an idea for us.",
-                    " Hmm... you're interesting."
+                    " *giggles and winks suggestively*",
+                    " *bounces on her feet, unable to sit still* Hehe~!",
+                    " That sounds fun! Let's do more of that~"
+                ])
+
+            if mood == 'thoughtful' and mood_scores['thoughtful'] > 7:
+                return random.choice([
+                    " *gets lost in thought, analyzing every detail about you...*",
+                    " That's an interesting data point. I'll add it to my model of you.",
+                    " Hmm... that gives me an idea for us. A plan."
                 ])
 
         return "" # No specific flavor text if no combination is met
@@ -839,18 +947,43 @@ class DialogueManager:
             self.add_memory(user_text, response, affection_change=1, is_fact_learning=True)
             return response
 
+        # NEW: Clarification questions
+        clarification = self.ask_clarification_question(lower)
+        if clarification:
+            response = self.personalize_response(clarification)
+            self.add_memory(user_text, response) # Add to memory to show she asked
+            return response
+
         # Fact recall command
         if lower == "what do you know about me?":
-            if not self.p.user_facts:
+            user_entity = self.kg.get_entity('user')
+            user_relations = self.kg.get_relations('user')
+
+            # Check if there is anything to report
+            has_attributes = user_entity and user_entity.get('attributes')
+            # We only care about relations where the user is the source
+            has_relations = any(r[0] == 'user' for r in user_relations)
+
+            if not has_attributes and not has_relations:
                 return "We're still getting to know each other, my love~ Tell me something about you!"
+
             summary = ["*I've been paying attention, darling~ Here's what I know about you:*"]
-            for key, value in self.p.user_facts.items():
-                # Format nicely
-                key_fmt = key.replace('_', ' ').replace('favorite ', 'your favorite ')
-                if isinstance(value, list):
-                    summary.append(f"- You like: {', '.join(value)}")
-                else:
-                    summary.append(f"- Your {key_fmt} is {value}")
+            if has_attributes:
+                for key, value in sorted(user_entity['attributes'].items()):
+                    summary.append(f"- Your {key.replace('_', ' ')} is {value}.")
+
+            likes = sorted([r[2] for r in user_relations if r[0] == 'user' and r[1] == 'likes'])
+            if likes:
+                summary.append(f"- You like: {', '.join(likes)}.")
+
+            favs = sorted([r for r in user_relations if r[0] == 'user' and r[1].startswith('favorite_')])
+            for _, rel, target in favs:
+                topic = rel.replace('favorite_', '')
+                summary.append(f"- Your favorite {topic} is {target}.")
+
+            if len(summary) == 1: # Only the intro text was added
+                 return "We're still getting to know each other, my love~ Tell me something about you!"
+
             return self.personalize_response("\n".join(summary))
 
         if lower == "reminders":
@@ -889,14 +1022,15 @@ class DialogueManager:
                 else:
                     summary.append("- I'm still learning about your interests~ Tell me more!")
 
-                if self.p.user_facts:
-                    fact_summary = []
-                    if 'name' in self.p.user_facts:
-                        fact_summary.append(f"I know your name is {self.p.user_facts['name']}.")
-                    if 'likes' in self.p.user_facts and self.p.user_facts['likes']:
-                         fact_summary.append(f"I remember you like {', '.join(self.p.user_facts['likes'])}.")
-                    if fact_summary:
-                        summary.append("- " + " ".join(fact_summary))
+                # This part still references user_facts, I need to remove it.
+                # if self.p.user_facts:
+                #     fact_summary = []
+                #     if 'name' in self.p.user_facts:
+                #         fact_summary.append(f"I know your name is {self.p.user_facts['name']}.")
+                #     if 'likes' in self.p.user_facts and self.p.user_facts['likes']:
+                #          fact_summary.append(f"I remember you like {', '.join(self.p.user_facts['likes'])}.")
+                #     if fact_summary:
+                #         summary.append("- " + " ".join(fact_summary))
 
                 # 5. Relationship Highlights
                 summary.append("\n*Relationship Highlights:*")
@@ -968,10 +1102,24 @@ class DialogueManager:
                 self.add_memory(user_text, final, affection_change=affection_change)
                 return final
 
-        # Semantic recall
-        recalled = self.m.recall_similar(user_text)
+        # Semantic recall (now mood-aware)
+        mood = self.p.get_dominant_mood()
+        memories_to_search = list(self.m.entries)
+        recall_preface = "*recalls jealously*" # Default preface
+
+        if mood == 'jealous' and self.p.mood_scores['jealous'] > 4:
+            jealous_memories = [m for m in memories_to_search if m.rival_names]
+            if jealous_memories:
+                memories_to_search = jealous_memories
+        elif mood == 'playful' and self.p.mood_scores['playful'] > 4:
+            playful_memories = [m for m in memories_to_search if "flirt" in m.user.lower() or "tease" in m.user.lower() or "joke" in m.user.lower()]
+            if playful_memories:
+                memories_to_search = playful_memories
+                recall_preface = "*giggles, remembering this...*"
+
+        recalled = self.m.recall_similar(user_text, entries_override=memories_to_search)
         if recalled:
-            resp = f"*recalls jealously* You said '{recalled}' before~ Still on that?" + affection_delta_str
+            resp = f"{recall_preface} You said '{recalled}' before~ Still on that?" + affection_delta_str
             resp = self.personalize_response(resp)
             self.add_memory(user_text, resp, affection_change=affection_change)
             return resp
@@ -1031,16 +1179,92 @@ class DialogueManager:
 # Behavior Scheduler (threads)
 # -----------------------------
 class BehaviorScheduler:
-    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref):
+    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph):
         self.voice = voice
         self.dm = dialogue
         self.p = personality
         self.r = reminders
         self.system = system
+        self.kg = kg
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
         self.stop_flag = threading.Event()
         self.already_commented_on_process = set()
+
+        self.goals = {
+            "learn_user_name": {
+                "priority": 0.8,
+                "conditions": [lambda: not self.kg.get_entity('user') or not self.kg.get_entity('user').get('attributes', {}).get('name')],
+                "actions": ["By the way, I never got your name... what should I call you, my love?"],
+                "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('name')
+            },
+            "learn_user_profession": {
+                "priority": 0.5,
+                "conditions": [lambda: not self.kg.get_entity('user') or not self.kg.get_entity('user').get('attributes', {}).get('profession')],
+                "actions": ["I'm so curious about what you do... What is your profession?"],
+                "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('profession')
+            },
+            "increase_affection": {
+                "priority": 0.6,
+                "conditions": [lambda: self.p.affection_score < 2],
+                "actions": ["I was just thinking about you... and how much I like spending time with you~", "Is there anything I can do to make you happy right now?"],
+                "fulfillment_check": lambda: self.p.affection_score >= 5
+            },
+            "resolve_jealousy": {
+                "priority": 0.0, # Starts at 0, priority increases with mood
+                "conditions": [lambda: self.p.get_dominant_mood() == 'jealous' and self.p.mood_scores['jealous'] > 5],
+                "actions": ["You're thinking about me, right? And only me? *jealous pout*", "We haven't spent enough time together lately... just us."],
+                "fulfillment_check": lambda: self.p.mood_scores['jealous'] < 3
+            },
+            "revisit_old_memory": {
+                "priority": 0.0, # Only active when thoughtful
+                "conditions": [lambda: self.p.get_dominant_mood() == 'thoughtful' and len(self.dm.m.entries) > 10],
+                "actions": [], # Actions are generated dynamically
+                "fulfillment_check": lambda: False # This goal can always be active
+            }
+        }
+        self.active_goals = []
+
+    def _update_goals(self):
+        # Dynamically adjust priorities based on current state
+        if self.p.get_dominant_mood() == 'thoughtful':
+            self.goals['learn_user_profession']['priority'] = 0.7
+        else:
+            self.goals['learn_user_profession']['priority'] = 0.5
+
+        # Jealousy priority is directly tied to the mood score
+        self.goals['resolve_jealousy']['priority'] = self.p.mood_scores.get('jealous', 0) / 10.0
+
+        # Affection-seeking priority
+        if self.p.affection_score < 0:
+            self.goals['increase_affection']['priority'] = 0.9
+        elif self.p.affection_score < 2:
+            self.goals['increase_affection']['priority'] = 0.7
+        else:
+            self.goals['increase_affection']['priority'] = 0.0 # Not a priority if affection is good
+
+        # Dynamic goal: Revisit old memory
+        if self.goals['revisit_old_memory']['conditions'][0](): # if thoughtful
+            random_memory = random.choice(list(self.dm.m.entries))
+            # A simple follow-up for now
+            action = f"I was just thinking about when you said '{random_memory.user}'. It made me feel thoughtful... what was on your mind then?"
+            # Update the goal's action and priority
+            self.goals['revisit_old_memory']['actions'] = [action]
+            self.goals['revisit_old_memory']['priority'] = 0.65
+        else:
+            self.goals['revisit_old_memory']['priority'] = 0.0
+
+        # Filter for goals whose conditions are met and are not yet fulfilled
+        self.active_goals = []
+        for name, goal in self.goals.items():
+            if goal["fulfillment_check"]():
+                continue
+
+            if all(cond() for cond in goal['conditions']):
+                self.active_goals.append({"name": name, "priority": goal['priority'], "action": random.choice(goal['actions'])})
+
+        # Sort by priority, highest first
+        self.active_goals.sort(key=lambda x: x['priority'], reverse=True)
 
     def mark_interaction(self):
         self.last_interaction_time = time.time()
@@ -1107,15 +1331,18 @@ class BehaviorScheduler:
             if now - self.last_interaction_time > IDLE_THRESHOLD_SEC:
                 mood = self.p.get_dominant_mood()
                 # Generate idle message based on mood
+                likes_relations = self.kg.get_relations('user')
+                user_likes = [r[2] for r in likes_relations if r[0] == 'user' and r[1] == 'likes']
+
                 idle_messages = {
                     'jealous': "Thinking about other people again? *glares* Don't forget who you belong to.",
                     'playful': "I'm bored~ Come play with me! *pokes you*",
                     'scheming': "I've been thinking of a way to make you mine forever... *dark giggle*",
-                    'thoughtful': f"I was just thinking about how you like {self.p.user_facts.get('likes', ['...'])[0]}... It's cute.",
+                    'thoughtful': f"I was just thinking about how you like {user_likes[0] if user_likes else '...'}... It's cute.",
                     'neutral': "Miss you, darling~ *pouts* Come back?",
                 }
                 # Fallback for thoughtful if no likes are known
-                if mood == 'thoughtful' and not self.p.user_facts.get('likes'):
+                if mood == 'thoughtful' and not user_likes:
                     message = "Just thinking about you... and what you might be hiding from me~"
                 else:
                     message = idle_messages.get(mood, idle_messages['neutral'])
@@ -1125,17 +1352,21 @@ class BehaviorScheduler:
                 self.p._update_affection_level()
                 self.mark_interaction() # Reset idle timer after she speaks
 
-            # --- Proactive Task Prediction ---
-            # Daily energy cycle: less proactive late at night
-            is_sleepy_time = hour >= 23 or hour < 6
-            proactive_chance = 0.3 if is_sleepy_time else 0.8
+            # --- Proactive Goal-Oriented Action ---
+            self._update_goals()
 
-            if self.p.affection_score > 3 and random.random() < proactive_chance:
-                task = self.dm.predict_task()
-                if task:
-                    self._post_gui(f"KawaiiKuro: {task}")
-                    # Avoid spamming tasks
-                    time.sleep(AUTO_BEHAVIOR_PERIOD_SEC * 2)
+            if self.active_goals:
+                # Get the highest priority goal
+                top_goal = self.active_goals[0]
+
+                # Decide whether to act on it based on priority and a bit of randomness
+                if random.random() < top_goal['priority']:
+                    action_text = top_goal['action']
+                    self._post_gui(f"KawaiiKuro: {action_text}")
+                    self.mark_interaction() # She initiated, so reset idle timer
+
+                    # Add a longer sleep to avoid spamming actions
+                    time.sleep(AUTO_BEHAVIOR_PERIOD_SEC * 3)
 
             time.sleep(AUTO_BEHAVIOR_PERIOD_SEC)
 
@@ -1160,8 +1391,10 @@ class BehaviorScheduler:
                 tagged = pos_tag(tokens)
 
                 stop_words = set(stopwords.words('english'))
-                if self.p.user_facts.get('name'):
-                    stop_words.add(self.p.user_facts.get('name').lower())
+                # This needs to be updated to get name from KG
+                user_entity = self.dm.kg.get_entity('user')
+                if user_entity and user_entity.get('attributes', {}).get('name'):
+                    stop_words.add(user_entity['attributes']['name'].lower())
 
                 nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in stop_words]
 
@@ -1199,7 +1432,7 @@ class BehaviorScheduler:
 
     def _auto_save_loop(self):
         while not self.stop_flag.is_set():
-            save_persistence(self.p, self.dm, self.dm.m, self.r)
+            save_persistence(self.p, self.dm, self.dm.m, self.r, self.kg)
             time.sleep(AUTO_SAVE_PERIOD_SEC)
 
     def _continuous_listen_loop(self):
@@ -1226,17 +1459,17 @@ def load_persistence() -> Dict[str, Any]:
         return {}
 
 
-def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManager, rem: ReminderManager):
+def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManager, rem: ReminderManager, kg: KnowledgeGraph):
     data = {
         'affection_score': p.affection_score,
         'spicy_mode': p.spicy_mode,
         'rival_mention_count': p.rival_mention_count,
         'rival_names': list(p.rival_names),
         'user_preferences': dict(p.user_preferences),
-        'user_facts': p.user_facts,
         'learned_topics': p.learned_topics,
         'core_entities': dict(p.core_entities),
         'mood_scores': p.mood_scores,
+        'knowledge_graph': kg.to_dict(),
         'learned_patterns': dm.learned_patterns,
         'memory': mm.to_list(),
         'reminders': rem.reminders,
@@ -1386,6 +1619,9 @@ def main():
     # Load persistence
     state = load_persistence()
 
+    kg = KnowledgeGraph()
+    kg.from_dict(state.get('knowledge_graph', {}))
+
     personality = PersonalityEngine()
     # restore
     personality.affection_score = int(state.get('affection_score', 0))
@@ -1393,7 +1629,6 @@ def main():
     personality.rival_mention_count = int(state.get('rival_mention_count', 0))
     personality.rival_names = set(state.get('rival_names', []))
     personality.user_preferences = Counter(state.get('user_preferences', {}))
-    personality.user_facts = state.get('user_facts', {})
     personality.learned_topics = state.get('learned_topics', [])
     personality.core_entities = Counter(state.get('core_entities', {}))
     personality.mood_scores = state.get('mood_scores', {'playful': 0, 'jealous': 0, 'scheming': 0, 'thoughtful': 0})
@@ -1411,7 +1646,7 @@ def main():
     math_eval = MathEvaluator()
     system_awareness = SystemAwareness()
 
-    dialogue = DialogueManager(personality, memory, reminders, math_eval)
+    dialogue = DialogueManager(personality, memory, reminders, math_eval, kg)
     # restore learned patterns
     for k, v in state.get('learned_patterns', {}).items():
         if isinstance(v, list):
@@ -1428,7 +1663,8 @@ def main():
         personality=personality,
         reminders=reminders,
         system=system_awareness,
-        gui_ref=lambda text: gui.thread_safe_post(text)
+        gui_ref=lambda text: gui.thread_safe_post(text),
+        kg=kg,
     )
 
     # Start background behaviors AFTER GUI exists
@@ -1444,7 +1680,7 @@ def main():
         gui.root.mainloop()
     finally:
         # Save state on exit
-        save_persistence(personality, dialogue, memory, reminders)
+        save_persistence(personality, dialogue, memory, reminders, kg)
         scheduler.stop()
 
 
