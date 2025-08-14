@@ -458,6 +458,15 @@ class KnowledgeGraph:
                             self.add_entity(entity_name, 'object', confidence=0.6, source='inferred')
                             # Add the relation
                             self.add_relation(entity_name, 'has_property', prop_value, confidence=0.6, source='inferred')
+
+                    # Heuristic 3: "I have a(n) X"
+                    m_has_a = re.search(r"i have (?:a|an)\s+([\w\s]+)", sentence, re.I)
+                    if m_has_a:
+                        thing_name = m_has_a.group(1).strip().lower()
+                        if thing_name not in ["feeling", "question", "idea"]: # Avoid abstract things
+                            self.add_entity(thing_name, 'object', confidence=0.8, source='inferred')
+                            self.add_relation('user', 'has', thing_name, confidence=0.8, source='inferred')
+
             except Exception:
                 # NLTK can sometimes fail, so we wrap this in a try-except block to be safe.
                 pass
