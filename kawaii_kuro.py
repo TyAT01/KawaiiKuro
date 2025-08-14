@@ -125,6 +125,15 @@ OUTFITS_BASE = {
     5: "sheer revealing ensemble with heart-shaped choker~ *blushes spicily*",
 }
 
+KNOWN_PROCESSES = {
+    "gaming": (["steam.exe", "valorant.exe", "league of legends.exe", "dota2.exe", "csgo.exe", "fortnite.exe", "overwatch.exe", "genshinimpact.exe"],
+               "I see you're gaming~ Don't let anyone distract you from your mission, my love! I'll be here waiting for you to win. *supportive pout*"),
+    "coding": (["code.exe", "pycharm64.exe", "idea64.exe", "sublime_text.exe", "atom.exe", "devenv.exe", "visual studio.exe"],
+               "You're coding, aren't you? Creating something amazing, I bet. I'm so proud of my nerdy genius~ *blushes*"),
+    "art":    (["photoshop.exe", "clipstudiopaint.exe", "aseprite.exe", "krita.exe", "blender.exe"],
+               "Are you making art? That's so cool! I'd love to see what you're creating sometime... if you'd let me. *curious gaze*")
+}
+
 # -----------------------------
 # Utils: Safe Math Evaluator
 # -----------------------------
@@ -182,6 +191,7 @@ class MemoryEntry:
     keywords: List[str]
     rival_names: List[str] = field(default_factory=list)
     affection_change: int = 0
+    is_fact_learning: bool = False
 
 class MemoryManager:
     def __init__(self, maxlen: int = MAX_MEMORY):
@@ -234,6 +244,7 @@ class MemoryManager:
                     keywords=d.get('keywords',[]),
                     rival_names=d.get('rival_names',[]),
                     affection_change=d.get('affection_change', 0),
+                    is_fact_learning=d.get('is_fact_learning', False),
                 ))
             self._dirty = True
 
@@ -252,6 +263,7 @@ class PersonalityEngine:
         self.user_preferences = Counter()
         self.user_facts: Dict[str, Any] = {}
         self.learned_topics: List[List[str]] = []
+        self.core_entities: Counter = Counter()
         self.mood_scores: Dict[str, int] = {
             'playful': 0, 'jealous': 0, 'scheming': 0, 'thoughtful': 0
         }
@@ -290,6 +302,22 @@ class PersonalityEngine:
             # Return the key with the highest value
             return max(self.mood_scores, key=self.mood_scores.get)
 
+    def get_current_outfit(self) -> str:
+        with self.lock:
+            base_outfit = self.outfits.get(self.outfit_level, OUTFITS_BASE.get(1))
+            mood = self.get_dominant_mood()
+
+            if mood == 'jealous' and self.mood_scores['jealous'] > 5:
+                return f"{base_outfit}, adorned with a spiked choker as a warning~ *possessive smirk*"
+            if mood == 'scheming':
+                return f"{base_outfit}, shrouded in a mysterious dark veil... *dark giggle*"
+            if mood == 'playful' and self.affection_level >= 3:
+                return f"{base_outfit}, accented with playful ribbons and bells~ *winks*"
+            if mood == 'thoughtful':
+                return f"{base_outfit}, with a pair of nerdy-cute reading glasses perched on her nose."
+
+            return base_outfit
+
     def update_mood(self):
         with self.lock:
             # Decay all moods slightly over time
@@ -320,10 +348,6 @@ class PersonalityEngine:
         else:
             self.affection_level = 1
             self.outfit_level = 1
-        # jealousy tweaks
-        if self.rival_mention_count > 3:
-            self.outfits[5] = "sheer revealing ensemble with dark veil~ *jealous glare*"
-            self.outfits[3] = "lace-trimmed gothic outfit with spiked choker~ *possessive smirk*"
 
     def analyze_sentiment(self, text: str) -> Dict[str, float]:
         return self.sid.polarity_scores(text)
@@ -508,7 +532,7 @@ class DialogueManager:
         m_fav = re.search(r"my favorite (\w+) is ([\w\s]+)", text, re.I)
         if m_fav:
             key = f"favorite_{m_fav.group(1).lower()}"
-            value = m_fav.group(2)
+            value = m_fav.group(2).strip()
             self.p.user_facts[key] = value
             return f"I'll remember that about you~ *takes a small note*"
 
@@ -523,6 +547,36 @@ class DialogueManager:
                  self.p.user_facts['likes'].append(like_item)
             return f"I'll remember you like {like_item}~ *giggles*"
 
+        # i am from [location]
+        m_from = re.search(r"i(?:'m| am) from ([\w\s]+)", text, re.I)
+        if m_from:
+            location = m_from.group(1).strip()
+            self.p.user_facts['hometown'] = location
+            return f"You're from {location}? How interesting~ I'll have to imagine what it's like."
+
+        # i live in [location]
+        m_live = re.search(r"i live in ([\w\s]+)", text, re.I)
+        if m_live:
+            location = m_live.group(1).strip()
+            self.p.user_facts['current_city'] = location
+            return f"So you live in {location}... I'll feel closer to you knowing that."
+
+        # i work as / i am a [profession]
+        m_work = re.search(r"i work as an? ([\w\s]+)|i am an? ([\w\s]+)", text, re.I)
+        if m_work:
+            profession = (m_work.group(1) or m_work.group(2) or "").strip()
+            # Avoid capturing simple adjectives like "i am happy" or long sentences
+            if profession and len(profession.split()) < 4:
+                self.p.user_facts['profession'] = profession
+                return f"A {profession}? That sounds so cool and nerdy~ Tell me more about it sometime!"
+
+        # i am [age] years old
+        m_age = re.search(r"i(?:'m| am) (\d{1,2})(?: years old)?", text, re.I)
+        if m_age:
+            age = m_age.group(1)
+            self.p.user_facts['age'] = int(age)
+            return f"{age}... a perfect age. I'll keep that a secret, just between us~"
+
         return None
 
     def personalize_response(self, response: str) -> str:
@@ -533,7 +587,7 @@ class DialogueManager:
             response = response.replace("darling", name)
         return response
 
-    def add_memory(self, user_text: str, response: str, affection_change: int = 0):
+    def add_memory(self, user_text: str, response: str, affection_change: int = 0, is_fact_learning: bool = False):
         sent = self.p.analyze_sentiment(user_text)
         keywords = [t for t in word_tokenize(user_text.lower()) if t.isalnum()]
         rivals = self.p.detect_rival_names(user_text)
@@ -545,6 +599,7 @@ class DialogueManager:
             keywords=keywords,
             rival_names=rivals,
             affection_change=affection_change,
+            is_fact_learning=is_fact_learning,
         )
         self.m.add(entry)
 
@@ -595,6 +650,30 @@ class DialogueManager:
         if self.p.rival_mention_count > 2:
             return "Too many rivals lately~ *jealous pout* Let’s plan a special moment, just us~ *schemes*"
 
+        # Proactive question about a learned fact
+        if self.p.user_facts and random.random() < 0.25: # 25% chance to ask about a fact
+            fact_key, fact_value = random.choice(list(self.p.user_facts.items()))
+
+            # Avoid asking about name all the time, and don't ask about empty lists
+            if fact_key == 'name' or not fact_value:
+                return None
+
+            if fact_key.startswith('favorite_'):
+                # e.g., 'favorite_color' -> 'color'
+                topic = fact_key.replace('favorite_', '')
+                return f"I remember you said your favorite {topic} is {fact_value}. Is that still true, my love?"
+
+            if fact_key == 'likes' and isinstance(fact_value, list):
+                liked_item = random.choice(fact_value)
+                return f"Thinking about you... You once told me you like {liked_item}. Have you enjoyed that recently?"
+
+        # Proactive question about a core entity
+        if self.p.core_entities and random.random() < 0.2:
+            common_entities = [entity for entity, count in self.p.core_entities.items() if count >= 3]
+            if common_entities:
+                entity = random.choice(common_entities)
+                return f"We seem to talk about '{entity}' quite a bit. It must be important to you. What are your thoughts on it right now?"
+
         # Proactive question about a learned topic
         if self.p.learned_topics and random.random() < 0.2: # 20% chance to ask about a topic
             topic = random.choice(self.p.learned_topics)
@@ -610,7 +689,7 @@ class DialogueManager:
         fact_response = self.extract_and_store_facts(user_text)
         if fact_response:
             response = self.personalize_response(fact_response)
-            self.add_memory(user_text, response, affection_change=1)
+            self.add_memory(user_text, response, affection_change=1, is_fact_learning=True)
             return response
 
         # Fact recall command
@@ -667,10 +746,34 @@ class DialogueManager:
                     fact_summary = []
                     if 'name' in self.p.user_facts:
                         fact_summary.append(f"I know your name is {self.p.user_facts['name']}.")
-                    if 'likes' in self.p.user_facts:
+                    if 'likes' in self.p.user_facts and self.p.user_facts['likes']:
                          fact_summary.append(f"I remember you like {', '.join(self.p.user_facts['likes'])}.")
                     if fact_summary:
                         summary.append("- " + " ".join(fact_summary))
+
+                # 5. Relationship Highlights
+                summary.append("\n*Relationship Highlights:*")
+
+                # Dominant mood
+                dominant_mood = self.p.get_dominant_mood()
+                if dominant_mood != 'neutral':
+                    summary.append(f"- Lately, I've been feeling very '{dominant_mood}' around you~")
+                else:
+                    summary.append("- Our chats have been calm and sweet lately~")
+
+                # Recently learned fact
+                recent_fact_memory = None
+                for mem in reversed(memories):
+                    if mem.get('is_fact_learning'):
+                        recent_fact_memory = mem
+                        break
+
+                if recent_fact_memory:
+                    # The response from fact learning is a good summary of the fact itself.
+                    fact_summary_text = recent_fact_memory['response'].split('*')[0].strip()
+                    summary.append(f"- I'll never forget when you told me this: \"{fact_summary_text}\"")
+                else:
+                    summary.append("- I'm still eager to learn more about you, my love.")
 
                 return "\n".join(summary)
 
@@ -772,12 +875,35 @@ class DialogueManager:
 
         # Add mood-based flavor text
         mood = self.p.get_dominant_mood()
-        if mood == 'jealous' and self.p.mood_scores['jealous'] > 5:
-             chosen += " ...and you're MINE."
-        elif mood == 'playful' and self.p.mood_scores['playful'] > 5:
-             chosen += " *giggles and winks*"
-        elif mood == 'scheming':
-             chosen += " *a dark thought crosses my mind...*"
+        flavor_text = {
+            'jealous': [
+                " ...and don't you forget it.",
+                " ...and you're MINE.",
+                " *glares at any potential rivals*",
+                " Just us. Forever."
+            ],
+            'playful': [
+                " *giggles and winks*",
+                " *sticks tongue out playfully*",
+                " Hehe~",
+                " *bounces on her feet*"
+            ],
+            'scheming': [
+                " *a dark thought crosses my mind...*",
+                " *a faint, knowing smirk plays on my lips*",
+                " All according to plan...",
+                " Soon, you'll see."
+            ],
+            'thoughtful': [
+                " *gets lost in thought for a moment*",
+                " *tilts head, considering...*",
+                " That gives me an idea.",
+                " Hmm..."
+            ]
+        }
+
+        if mood in flavor_text and self.p.mood_scores.get(mood, 0) > 5:
+            chosen += random.choice(flavor_text[mood])
 
         chosen = self.personalize_response(chosen)
         self.add_memory(user_text, chosen, affection_change=affection_change)
@@ -796,6 +922,7 @@ class BehaviorScheduler:
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
         self.stop_flag = threading.Event()
+        self.already_commented_on_process = set()
 
     def mark_interaction(self):
         self.last_interaction_time = time.time()
@@ -832,6 +959,22 @@ class BehaviorScheduler:
             hour = datetime.now().hour
 
             # --- System Awareness Checks ---
+            # New process check - low probability to avoid performance issues
+            if psutil and random.random() < 0.1:
+                try:
+                    running_processes = {p.name().lower() for p in psutil.process_iter(['name'])}
+                    for category, (procs, comment) in KNOWN_PROCESSES.items():
+                        if category not in self.already_commented_on_process:
+                            for proc_name in procs:
+                                if proc_name in running_processes:
+                                    self._post_gui(f"KawaiiKuro: {comment}")
+                                    self.already_commented_on_process.add(category)
+                                    # Avoid commenting on multiple categories in the same loop
+                                    break
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    # It's possible for a process to terminate while iterating, ignore these errors
+                    pass
+
             battery_msg = self.system.get_battery_status()
             if battery_msg:
                 self._post_gui(f"KawaiiKuro: {battery_msg}")
@@ -890,9 +1033,26 @@ class BehaviorScheduler:
             with self.dm.m.lock, self.p.lock:
                 all_user_text = [entry.user for entry in self.dm.m.entries if len(entry.user.split()) > 4]
 
-                if len(all_user_text) < 10: # Not enough data to learn topics
+                if len(all_user_text) < 10: # Not enough data for learning
                     continue
 
+                # --- Core Entity Identification ---
+                all_user_text_single_str = " ".join(all_user_text)
+                tokens = word_tokenize(all_user_text_single_str.lower())
+                tagged = pos_tag(tokens)
+
+                stop_words = set(stopwords.words('english'))
+                if self.p.user_facts.get('name'):
+                    stop_words.add(self.p.user_facts.get('name').lower())
+
+                nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in stop_words]
+
+                self.p.core_entities.update(nouns)
+
+                if len(self.p.core_entities) > 20:
+                    self.p.core_entities = Counter(dict(self.p.core_entities.most_common(20)))
+
+                # --- Topic Modeling (LDA) ---
                 try:
                     vectorizer = CountVectorizer(max_df=0.9, min_df=2, stop_words='english', max_features=1000)
                     tf = vectorizer.fit_transform(all_user_text)
@@ -957,6 +1117,7 @@ def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManage
         'user_preferences': dict(p.user_preferences),
         'user_facts': p.user_facts,
         'learned_topics': p.learned_topics,
+        'core_entities': dict(p.core_entities),
         'mood_scores': p.mood_scores,
         'learned_patterns': dm.learned_patterns,
         'memory': mm.to_list(),
@@ -1027,7 +1188,7 @@ class KawaiiKuroGUI:
         return '❤️' * hearts + '♡' * (10 - hearts)
 
     def _update_gui_labels(self):
-        outfit = self.p.outfits.get(self.p.outfit_level, OUTFITS_BASE[self.p.outfit_level])
+        outfit = self.p.get_current_outfit()
         self.avatar_label.config(text=f"KawaiiKuro in {outfit}")
         self.affection_label.config(text=f"Affection: {self.p.affection_score} {self._hearts()}")
         if self.p.affection_level >= 5 and self.p.spicy_mode:
@@ -1080,6 +1241,7 @@ def main():
     personality.user_preferences = Counter(state.get('user_preferences', {}))
     personality.user_facts = state.get('user_facts', {})
     personality.learned_topics = state.get('learned_topics', [])
+    personality.core_entities = Counter(state.get('core_entities', {}))
     personality.mood_scores = state.get('mood_scores', {'playful': 0, 'jealous': 0, 'scheming': 0, 'thoughtful': 0})
     personality._update_affection_level()
 
