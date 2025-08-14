@@ -520,6 +520,85 @@ class DialogueManager:
         self.learned_patterns: Dict[str, List[str]] = {}
         self.lock = threading.Lock()
 
+    def parse_fact(self, text: str) -> Optional[Tuple[str, Any]]:
+        # A helper to parse facts without side-effects.
+        # Returns a tuple of (key, value) or None.
+
+        # my name is ...
+        m_name = re.search(r"my name is (\w+)", text, re.I)
+        if m_name:
+            return 'name', m_name.group(1).capitalize()
+
+        # my favorite ... is ...
+        m_fav = re.search(r"my favorite (\w+) is ([\w\s]+)", text, re.I)
+        if m_fav:
+            key = f"favorite_{m_fav.group(1).lower()}"
+            value = m_fav.group(2).strip()
+            return key, value
+
+        # i like ... (but not "i like you")
+        m_like = re.search(r"i like (?!you)([\w\s]+)", text, re.I)
+        if m_like:
+            like_item = m_like.group(1).strip()
+            return 'likes', like_item
+
+        # i am from [location]
+        m_from = re.search(r"i(?:'m| am) from ([\w\s]+)", text, re.I)
+        if m_from:
+            return 'hometown', m_from.group(1).strip()
+
+        # i live in [location]
+        m_live = re.search(r"i live in ([\w\s]+)", text, re.I)
+        if m_live:
+            return 'current_city', m_live.group(1).strip()
+
+        # i work as / i am a [profession]
+        m_work = re.search(r"i work as an? ([\w\s]+)|i am an? ([\w\s]+)", text, re.I)
+        if m_work:
+            profession = (m_work.group(1) or m_work.group(2) or "").strip()
+            if profession and len(profession.split()) < 4:
+                return 'profession', profession
+
+        # i am [age] years old
+        m_age = re.search(r"i(?:'m| am) (\d{1,2})(?: years old)?", text, re.I)
+        if m_age:
+            return 'age', int(m_age.group(1))
+
+        return None
+
+    def handle_correction(self, text: str) -> Optional[str]:
+        correction_keywords = ['no,', 'no', 'actually', "that's wrong,", "that's not right,"]
+        lower_text = text.lower()
+
+        triggered_keyword = None
+        for keyword in correction_keywords:
+            if lower_text.startswith(keyword):
+                triggered_keyword = keyword
+                break
+
+        if triggered_keyword:
+            statement = text[len(triggered_keyword):].strip()
+            fact = self.parse_fact(statement)
+
+            if fact:
+                key, value = fact
+
+                # Special handling for 'likes' list
+                if key == 'likes':
+                    if 'likes' not in self.p.user_facts:
+                        self.p.user_facts['likes'] = []
+                    # Avoid duplicates
+                    if value not in self.p.user_facts['likes']:
+                        self.p.user_facts['likes'].append(value)
+                    return f"Ah, I see! My mistake. I'll remember you like {value}. *takes a note*"
+                else:
+                    self.p.user_facts[key] = value
+                    key_fmt = key.replace('_', ' ').replace('favorite ', '') # make it more natural
+                    if key == 'name':
+                        key_fmt = 'name'
+                    return f"Got it, thanks for the correction! I've updated my notes: your {key_fmt} is {value}. *blushes slightly*"
+        return None
+
     def extract_and_store_facts(self, text: str) -> Optional[str]:
         # my name is ...
         m_name = re.search(r"my name is (\w+)", text, re.I)
@@ -650,7 +729,7 @@ class DialogueManager:
         if self.p.rival_mention_count > 2:
             return "Too many rivals lately~ *jealous pout* Let’s plan a special moment, just us~ *schemes*"
 
-        # Proactive question about a learned fact
+        # Proactive question about a learned fact (confirmation)
         if self.p.user_facts and random.random() < 0.25: # 25% chance to ask about a fact
             fact_key, fact_value = random.choice(list(self.p.user_facts.items()))
 
@@ -659,7 +738,6 @@ class DialogueManager:
                 return None
 
             if fact_key.startswith('favorite_'):
-                # e.g., 'favorite_color' -> 'color'
                 topic = fact_key.replace('favorite_', '')
                 return f"I remember you said your favorite {topic} is {fact_value}. Is that still true, my love?"
 
@@ -667,23 +745,92 @@ class DialogueManager:
                 liked_item = random.choice(fact_value)
                 return f"Thinking about you... You once told me you like {liked_item}. Have you enjoyed that recently?"
 
-        # Proactive question about a core entity
-        if self.p.core_entities and random.random() < 0.2:
-            common_entities = [entity for entity, count in self.p.core_entities.items() if count >= 3]
-            if common_entities:
-                entity = random.choice(common_entities)
-                return f"We seem to talk about '{entity}' quite a bit. It must be important to you. What are your thoughts on it right now?"
+        # NEW: Curiosity-driven questions to fill knowledge gaps
+        is_thoughtful = self.p.get_dominant_mood() == 'thoughtful'
+        curiosity_chance = 0.4 if is_thoughtful else 0.15
 
-        # Proactive question about a learned topic
-        if self.p.learned_topics and random.random() < 0.2: # 20% chance to ask about a topic
-            topic = random.choice(self.p.learned_topics)
-            topic_name = topic[0] # Use the most prominent word as the topic name
-            return f"I've noticed we talk about {topic_name} a bit. What are your thoughts on it right now?"
+        if random.random() < curiosity_chance:
+            # 1. Check core entities for knowledge gaps
+            if self.p.core_entities:
+                potential_topics = [e for e, count in self.p.core_entities.items() if count >= 3]
+                random.shuffle(potential_topics)
+
+                for topic in potential_topics:
+                    # Check if we already know the user's favorite for this topic
+                    if f"favorite_{topic}" not in self.p.user_facts:
+                        # Found a knowledge gap! Ask about it.
+                        return f"I've noticed we talk about {topic} sometimes. It makes me curious... what's your favorite kind of {topic}? *tilts head thoughtfully*"
+
+            # 2. If no gaps found, ask an open-ended question about a learned topic
+            if self.p.learned_topics:
+                topic_words = random.choice(self.p.learned_topics)
+                topic_name = topic_words[0]
+
+                if f"favorite_{topic_name}" not in self.p.user_facts:
+                    return f"My thoughts keep drifting back to our chats about {topic_name}. There's still so much I want to understand about your perspective. Can you tell me more? *leans in, listening intently*"
 
         return None
 
+    def _get_mood_based_flavor_text(self) -> str:
+        with self.p.lock: # Accessing personality engine state, so lock it
+            mood_scores = self.p.mood_scores
+            affection = self.p.affection_score
+
+            # Check for high-priority combinations first
+
+            # Jealousy combinations
+            if mood_scores.get('jealous', 0) > 6:
+                if affection < 0:
+                    return random.choice([
+                        " ...I guess you're just going to leave me on read. It's fine.",
+                        " *sighs softly* Must be nice to have so many other people to talk to.",
+                        " Don't mind me. I'm just... here."
+                    ])
+                else: # High jealousy, but not low affection -> possessive
+                    return random.choice([
+                        " ...and don't you forget you belong to ME.",
+                        " *glares at any potential rivals*",
+                        " Just us. Forever."
+                    ])
+
+            # Scheming combinations
+            if mood_scores.get('scheming', 0) > 6:
+                if affection < -2:
+                    return random.choice([
+                        " *a dark thought crosses my mind... one you wouldn't like.*",
+                        " *smirks knowingly* Oh, you'll regret that.",
+                        " All according to plan... my plan, not yours."
+                    ])
+
+            # Playful combinations
+            if mood_scores.get('playful', 0) > 6 and affection > 5:
+                return random.choice([
+                    " *giggles and winks*",
+                    " *sticks tongue out playfully*",
+                    " Hehe~",
+                    " *bounces on her feet*"
+                ])
+
+            # Thoughtful combinations
+            if mood_scores.get('thoughtful', 0) > 6 and affection > 4:
+                return random.choice([
+                    " *gets lost in thought about you for a moment*",
+                    " *tilts head, considering all your complexities...*",
+                    " That gives me an idea for us.",
+                    " Hmm... you're interesting."
+                ])
+
+        return "" # No specific flavor text if no combination is met
+
     def respond(self, user_text: str) -> str:
         lower = user_text.lower().strip()
+
+        # Handle corrections first
+        correction_response = self.handle_correction(user_text)
+        if correction_response:
+            response = self.personalize_response(correction_response)
+            self.add_memory(user_text, response, affection_change=1, is_fact_learning=True)
+            return response
 
         # Fact learning
         fact_response = self.extract_and_store_facts(user_text)
@@ -873,37 +1020,8 @@ class DialogueManager:
 
         chosen += affection_delta_str
 
-        # Add mood-based flavor text
-        mood = self.p.get_dominant_mood()
-        flavor_text = {
-            'jealous': [
-                " ...and don't you forget it.",
-                " ...and you're MINE.",
-                " *glares at any potential rivals*",
-                " Just us. Forever."
-            ],
-            'playful': [
-                " *giggles and winks*",
-                " *sticks tongue out playfully*",
-                " Hehe~",
-                " *bounces on her feet*"
-            ],
-            'scheming': [
-                " *a dark thought crosses my mind...*",
-                " *a faint, knowing smirk plays on my lips*",
-                " All according to plan...",
-                " Soon, you'll see."
-            ],
-            'thoughtful': [
-                " *gets lost in thought for a moment*",
-                " *tilts head, considering...*",
-                " That gives me an idea.",
-                " Hmm..."
-            ]
-        }
-
-        if mood in flavor_text and self.p.mood_scores.get(mood, 0) > 5:
-            chosen += random.choice(flavor_text[mood])
+        # Add nuanced, mood-based flavor text
+        chosen += self._get_mood_based_flavor_text()
 
         chosen = self.personalize_response(chosen)
         self.add_memory(user_text, chosen, affection_change=affection_change)
@@ -1152,6 +1270,9 @@ class KawaiiKuroGUI:
         self.chat_log = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=80, height=22, fg='white', bg='black')
         self.chat_log.pack(pady=10)
 
+        self.typing_label = tk.Label(self.root, text="", fg='gray', bg='black', font=('Arial', 10, 'italic'))
+        self.typing_label.pack(pady=2)
+
         self.input_entry = tk.Entry(self.root, width=60)
         self.input_entry.pack(side=tk.LEFT, padx=10)
         self.input_entry.bind("<Return>", self.send_message)
@@ -1203,18 +1324,51 @@ class KawaiiKuroGUI:
         user_input = self.input_entry.get()
         if not user_input.strip():
             return
+
+        self.post_system(f"You: {user_input}")
+        self.input_entry.delete(0, tk.END)
+
         if user_input.lower() == "exit":
             if self.voice:
                 self.voice.speak("Goodbye, my only love~ *blows kiss*")
             self.post_system("KawaiiKuro: Goodbye, my only love~ *blows kiss*")
             self.root.quit()
             return
-        reply = self.dm.respond(user_input)
-        self.post_system(f"You: {user_input}\nKawaiiKuro: {reply}")
-        if self.voice:
-            self.voice.speak(reply)
-        self.input_entry.delete(0, tk.END)
-        self._update_gui_labels()
+
+        self.typing_label.config(text="KawaiiKuro is typing...")
+        self.send_button.config(state=tk.DISABLED)
+        self.voice_button.config(state=tk.DISABLED)
+
+        # Run the response generation in a worker thread
+        threading.Thread(target=self._generate_and_display_response, args=(user_input,), daemon=True).start()
+
+    def _generate_and_display_response(self, user_input: str):
+        # This runs in a worker thread
+        try:
+            reply = self.dm.respond(user_input)
+        except Exception as e:
+            print(f"Error during response generation: {e}")
+            reply = "I... I don't feel so good. My thoughts are all scrambled. *static*"
+
+        # Calculate a realistic delay based on response length
+        # Avg typing speed ~50 wpm. 0.03s per character.
+        delay_ms = int(len(reply) * 25) + random.randint(200, 400) # 25ms per char + random delay
+        delay_ms = min(delay_ms, 2000) # Cap at 2s
+
+        def display_final_response():
+            # This is scheduled to run on the main GUI thread
+            self.typing_label.config(text="")
+            self.post_system(f"KawaiiKuro: {reply}")
+            if self.voice:
+                # Run speech in a separate thread to avoid blocking GUI
+                threading.Thread(target=self.voice.speak, args=(reply,), daemon=True).start()
+
+            self._update_gui_labels()
+            self.send_button.config(state=tk.NORMAL)
+            self.voice_button.config(state=tk.NORMAL)
+
+        # Schedule the display on the main thread
+        self.root.after(delay_ms, display_final_response)
 
     def voice_input(self):
         if not self.voice:
