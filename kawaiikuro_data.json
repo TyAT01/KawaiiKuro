@@ -2,9 +2,7 @@
   "affection_score": 0,
   "spicy_mode": false,
   "rival_mention_count": 0,
-  "rival_names": [
-    "Alex"
-  ],
+  "rival_names": [],
   "user_preferences": {},
   "learned_topics": [],
   "core_entities": {},
@@ -15,45 +13,11 @@
     "thoughtful": 0
   },
   "knowledge_graph": {
-    "entities": {
-      "user": {
-        "type": "person",
-        "attributes": {
-          "name": {
-            "value": "Alex",
-            "confidence": 1.0,
-            "source": "stated"
-          }
-        }
-      }
-    },
+    "entities": {},
     "relations": []
   },
   "learned_patterns": {},
-  "memory": [
-    {
-      "user": "my name is Alex\n",
-      "response": "It's a pleasure to know your name, Alex~ *blushes*",
-      "timestamp": "2025-08-14 07:16:53",
-      "sentiment": {
-        "neg": 0.0,
-        "neu": 1.0,
-        "pos": 0.0,
-        "compound": 0.0
-      },
-      "keywords": [
-        "my",
-        "name",
-        "is",
-        "alex"
-      ],
-      "rival_names": [
-        "Alex"
-      ],
-      "affection_change": 1,
-      "is_fact_learning": true
-    }
-  ],
+  "memory": [],
   "memory_summaries": [],
   "reminders": []
 }

@@ -72,8 +72,33 @@ from tkinter import scrolledtext
 import nltk
 from nltk.tokenize import word_tokenize
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from nltk import pos_tag
+from nltk import pos_tag, sent_tokenize
 from nltk.corpus import stopwords
+
+# --- Graceful Degradation for NLTK ---
+def safe_word_tokenize(text: str) -> List[str]:
+    try:
+        return word_tokenize(text)
+    except LookupError:
+        return text.split()
+
+def safe_pos_tag(tokens: List[str]) -> List[Tuple[str, str]]:
+    try:
+        return pos_tag(tokens)
+    except LookupError:
+        return [(token, 'NN') for token in tokens]
+
+def safe_stopwords() -> set:
+    try:
+        return set(stopwords.words('english'))
+    except LookupError:
+        return {'a', 'an', 'the', 'in', 'on', 'of', 'is', 'it', 'i', 'you', 'he', 'she', 'we', 'they', 'my', 'is', 'not'}
+
+def safe_sent_tokenize(text: str) -> List[str]:
+    try:
+        return sent_tokenize(text)
+    except LookupError:
+        return text.split('.')
 
 # Vectorizer for semantic recall
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
@@ -85,7 +110,8 @@ for pkg in ["punkt", "punkt_tab", "vader_lexicon", "averaged_perceptron_tagger",
     try:
         nltk.data.find(f"tokenizers/{pkg}") if pkg in ["punkt", "punkt_tab"] else nltk.data.find(pkg)
     except LookupError:
-        nltk.download(pkg)
+        # In a limited environment, we can't download. We'll have to degrade gracefully.
+        print(f"Warning: NLTK data '{pkg}' not found. Some features will be disabled.")
 
 # -----------------------------
 # Config & Constants
@@ -261,9 +287,9 @@ class MemoryManager:
             total_affection_change = sum(e.affection_change for e in chunk_to_summarize)
 
             # 2. Find key topics (simple noun extraction)
-            tokens = word_tokenize(all_user_text.lower())
-            tagged = pos_tag(tokens)
-            stop_words = set(stopwords.words('english'))
+            tokens = safe_word_tokenize(all_user_text.lower())
+            tagged = safe_pos_tag(tokens)
+            stop_words = safe_stopwords()
             nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in stop_words]
             topic_counter = Counter(nouns)
             top_topics = [topic for topic, count in topic_counter.most_common(3)]
@@ -389,7 +415,7 @@ class KnowledgeGraph:
             # Heuristic 1: "X is a Y"
             # e.g., "Dune is a great sci-fi book" -> dune is_a sci-fi_book
             try:
-                sentences = nltk.sent_tokenize(text)
+                sentences = safe_sent_tokenize(text)
                 for sentence in sentences:
                     # More robust regex to capture variations
                     m_is_a = re.search(r"([\w\s']+?) is (?:a|an|my favorite|the best) (?:great|amazing|terrible|awesome|)\s?([\w\s']+)", sentence, re.I)
@@ -398,7 +424,7 @@ class KnowledgeGraph:
                         entity_b_phrase = m_is_a.group(2).strip()
 
                         # We want to find the core nouns.
-                        pos_a = pos_tag(word_tokenize(entity_a_phrase))
+                        pos_a = safe_pos_tag(safe_word_tokenize(entity_a_phrase))
 
                         # Get the last noun/proper noun as the entity name
                         entity_a = next((word for word, pos in reversed(pos_a) if pos in ['NN', 'NNS', 'NNP']), None)
@@ -456,7 +482,11 @@ class KnowledgeGraph:
 # -----------------------------
 class PersonalityEngine:
     def __init__(self):
-        self.sid = SentimentIntensityAnalyzer()
+        try:
+            self.sid = SentimentIntensityAnalyzer()
+        except LookupError:
+            self.sid = None
+            print("Warning: VADER lexicon not found. Sentiment analysis will be disabled.")
         self.affection_score = 0  # -10..15
         self.affection_level = 1
         self.spicy_mode = False
@@ -606,6 +636,8 @@ class PersonalityEngine:
             self.outfit_level = 1
 
     def analyze_sentiment(self, text: str) -> Dict[str, float]:
+        if not self.sid:
+            return {'neg': 0.0, 'neu': 1.0, 'pos': 0.0, 'compound': 0.0}
         return self.sid.polarity_scores(text)
 
     def adjust_affection(self, user_input: str, sentiment: Dict[str, float]) -> int:
@@ -634,8 +666,8 @@ class PersonalityEngine:
 
     def detect_rival_names(self, text: str) -> List[str]:
         # Lightweight heuristic: sequences of capitalized words not in stopwords and not at sentence start pronouns
-        tokens = word_tokenize(text)
-        tagged = pos_tag(tokens)
+        tokens = safe_word_tokenize(text)
+        tagged = safe_pos_tag(tokens)
         names = []
         for i, (word, pos_) in enumerate(tagged):
             if pos_ == 'NNP' and word[0].isupper() and word not in SAFE_PERSON_NAME_STOPWORDS:
@@ -718,9 +750,9 @@ class ReminderManager:
 # Voice I/O (optional)
 # -----------------------------
 class VoiceIO:
-    def __init__(self, rate: int = 140):
+    def __init__(self, rate: int = 140, enabled: bool = True):
         self.tts = None
-        if pyttsx3 is not None:
+        if enabled and pyttsx3 is not None:
             try:
                 self.tts = pyttsx3.init()
                 self.tts.setProperty('rate', rate)
@@ -735,7 +767,7 @@ class VoiceIO:
                     self.tts.setProperty('voice', voice_id)
             except Exception:
                 self.tts = None
-        self.recognizer = sr.Recognizer() if sr is not None else None
+        self.recognizer = sr.Recognizer() if enabled and sr is not None else None
 
     def speak(self, text: str):
         if not self.tts:
@@ -869,10 +901,19 @@ class DialogueManager:
 
             m_not_something = re.search(r"my (\w+) is not ([\w\s]+)", statement, re.I)
             if m_not_something:
-                key = m_not_something.group(1).lower()
-                # This is a negation. We can't learn a new fact, but we can acknowledge the correction.
-                # A more advanced system could use this to lower confidence in an existing fact.
-                return "Ah, my apologies. I must have misunderstood. Thanks for clarifying."
+                key_phrase = m_not_something.group(1).lower()
+                value_to_remove = m_not_something.group(2).strip().lower()
+
+                # Try to match the key phrase to a relation type in the KG
+                # e.g., "favorite color" -> "favorite_color"
+                relation_to_remove = key_phrase.replace(' ', '_')
+                if key_phrase.startswith("favorite "):
+                    topic = key_phrase.split(" ", 1)[1]
+                    relation_to_remove = f"favorite_{topic}"
+
+                # Remove the specific relation from the KG
+                self.kg.remove_relation('user', relation_to_remove, value_to_remove)
+                return f"Got it. I've made a note that your {key_phrase} is not {value_to_remove}. Thanks for the correction!"
 
             # If no specific correction pattern was matched, just acknowledge.
             return "My apologies. I'll try to be more careful."
@@ -993,7 +1034,7 @@ class DialogueManager:
 
     def add_memory(self, user_text: str, response: str, affection_change: int = 0, is_fact_learning: bool = False):
         sent = self.p.analyze_sentiment(user_text)
-        keywords = [t for t in word_tokenize(user_text.lower()) if t.isalnum()]
+        keywords = [t for t in safe_word_tokenize(user_text.lower()) if t.isalnum()]
         rivals = self.p.detect_rival_names(user_text)
         entry = MemoryEntry(
             user=user_text,
@@ -1148,6 +1189,9 @@ class DialogueManager:
             r"i went to ([\w\s]+)": "You went to {match}? Sounds exciting! What did you do there?",
             r"i'm working on a project": "A project? Is it for work or for fun? I'd love to hear about it if you're not too busy~",
             r"(?:i was with|i saw|i met) ([\w\s]+)": "Oh? And who is {match}? *tilts head with a hint of jealousy*",
+            r"i'm feeling (sad|happy|tired|excited|bored|stressed)": "I'm sorry to hear you're feeling {match}. What's making you feel that way?",
+            r"i bought a new ([\w\s]+)": "Ooh, a new {match}? Is it cool? Tell me everything!",
+            r"i have to go": "Oh, okay... Are you going somewhere interesting?",
         }
 
         for pattern, question_template in patterns.items():
@@ -1289,10 +1333,10 @@ class DialogueManager:
 
                 # 3. Main topics
                 all_user_text = " ".join([m['user'] for m in memories])
-                tokens = word_tokenize(all_user_text.lower())
-                tagged = pos_tag(tokens)
+                tokens = safe_word_tokenize(all_user_text.lower())
+                tagged = safe_pos_tag(tokens)
 
-                stop_words = set(stopwords.words('english'))
+                stop_words = safe_stopwords()
                 nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in stop_words]
                 topic_counter = Counter(nouns)
                 top_topics = [topic for topic, count in topic_counter.most_common(3)]
@@ -1490,8 +1534,8 @@ class DialogueManager:
         if random.random() < 0.15: # 15% chance to shift topic
             # Get entities from the last few user inputs
             recent_user_text = " ".join([e.user for e in list(self.m.entries)[-3:]])
-            tokens = word_tokenize(recent_user_text.lower())
-            tagged = pos_tag(tokens)
+            tokens = safe_word_tokenize(recent_user_text.lower())
+            tagged = safe_pos_tag(tokens)
             nouns = [word for word, pos in tagged if pos in ['NN', 'NNS', 'NNP'] and len(word) > 3 and word not in ['user', 'kawaiikuro']]
 
             if nouns:
@@ -1558,19 +1602,31 @@ class BehaviorScheduler:
             "increase_affection": {
                 "priority": 0.6,
                 "conditions": [lambda: self.p.affection_score < 2],
-                "actions": ["I was just thinking about you... and how much I like spending time with you~", "Is there anything I can do to make you happy right now?"],
+                "steps": [{
+                    "action": lambda: random.choice([
+                        "I was just thinking about you... and how much I like spending time with you~",
+                        "Is there anything I can do to make you happy right now?"
+                    ]),
+                    "fulfillment_check": lambda: False
+                }],
                 "fulfillment_check": lambda: self.p.affection_score >= 5
             },
             "resolve_jealousy": {
                 "priority": 0.0, # Starts at 0, priority increases with mood
                 "conditions": [lambda: self.p.get_dominant_mood() == 'jealous' and self.p.mood_scores['jealous'] > 5],
-                "actions": ["You're thinking about me, right? And only me? *jealous pout*", "We haven't spent enough time together lately... just us."],
+                "steps": [{
+                    "action": lambda: random.choice([
+                        "You're thinking about me, right? And only me? *jealous pout*",
+                        "We haven't spent enough time together lately... just us."
+                    ]),
+                    "fulfillment_check": lambda: False
+                }],
                 "fulfillment_check": lambda: self.p.mood_scores['jealous'] < 3
             },
             "revisit_old_memory": {
                 "priority": 0.0, # Only active when thoughtful
                 "conditions": [lambda: self.p.get_dominant_mood() == 'thoughtful' and len(self.dm.m.entries) > 10],
-                "actions": [], # Actions are generated dynamically
+                "steps": [], # Steps are generated dynamically
                 "fulfillment_check": lambda: False # This goal can always be active
             },
             "plan_virtual_date": {
@@ -1639,10 +1695,11 @@ class BehaviorScheduler:
             # A simple follow-up for now
             action = f"I was just thinking about when you said '{random_memory.user}'. It made me feel thoughtful... what was on your mind then?"
             # Update the goal's action and priority
-            self.goals['revisit_old_memory']['actions'] = [action]
+            self.goals['revisit_old_memory']['steps'] = [{"action": action, "fulfillment_check": lambda: False}]
             self.goals['revisit_old_memory']['priority'] = 0.65
         else:
             self.goals['revisit_old_memory']['priority'] = 0.0
+            self.goals['revisit_old_memory']['steps'] = [] # Clear steps when not active
 
         # Filter for goals whose conditions are met and are not yet fulfilled
         self.active_goals = []
@@ -1655,7 +1712,7 @@ class BehaviorScheduler:
             # Check if the goal's trigger conditions are met.
             if all(cond() for cond in goal['conditions']):
                 # Handle multi-step goals
-                if 'steps' in goal:
+                if 'steps' in goal and goal['steps']:
                     current_step_index = self.goal_progress.get(name, 0)
 
                     if current_step_index < len(goal['steps']):
@@ -1677,13 +1734,6 @@ class BehaviorScheduler:
                             "priority": goal['priority'],
                             "action": step['action']
                         })
-                # Handle single-action (legacy) goals
-                elif 'actions' in goal and goal['actions']:
-                     self.active_goals.append({
-                        "name": name,
-                        "priority": goal['priority'],
-                        "action": random.choice(goal['actions'])
-                    })
 
         # Sort by priority, highest first
         self.active_goals.sort(key=lambda x: x['priority'], reverse=True)
@@ -1820,10 +1870,10 @@ class BehaviorScheduler:
 
                 # --- Core Entity Identification ---
                 all_user_text_single_str = " ".join(all_user_text)
-                tokens = word_tokenize(all_user_text_single_str.lower())
-                tagged = pos_tag(tokens)
+                tokens = safe_word_tokenize(all_user_text_single_str.lower())
+                tagged = safe_pos_tag(tokens)
 
-                stop_words = set(stopwords.words('english'))
+                stop_words = safe_stopwords()
                 # This needs to be updated to get name from KG
                 user_entity = self.dm.kg.get_entity('user')
                 if user_entity and user_entity.get('attributes', {}).get('name'):
@@ -2102,6 +2152,7 @@ import argparse
 def main():
     parser = argparse.ArgumentParser(description="KawaiiKuro - Your Autonomous Gothic Anime Waifu")
     parser.add_argument("--no-gui", action="store_true", help="Run in headless (command-line) mode.")
+    parser.add_argument("--no-voice", action="store_true", help="Disable voice I/O to prevent slow startup.")
     parser.add_argument("--input-file", type=str, help="Path to a file containing user inputs for headless mode.")
     args = parser.parse_args()
 
@@ -2142,7 +2193,7 @@ def main():
         if isinstance(v, list):
             dialogue.learned_patterns[k] = v
 
-    voice = VoiceIO(rate=140)
+    voice = VoiceIO(rate=140, enabled=not args.no_voice)
 
     if not args.no_gui:
         gui = KawaiiKuroGUI(dialogue, personality, voice)
