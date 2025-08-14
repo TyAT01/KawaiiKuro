@@ -81,9 +81,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import LatentDirichletAllocation
 
 # Ensure NLTK data
-for pkg in ["punkt", "vader_lexicon", "averaged_perceptron_tagger", "stopwords"]:
+for pkg in ["punkt", "punkt_tab", "vader_lexicon", "averaged_perceptron_tagger", "averaged_perceptron_tagger_eng", "stopwords"]:
     try:
-        nltk.data.find(f"tokenizers/{pkg}") if pkg == "punkt" else nltk.data.find(pkg)
+        nltk.data.find(f"tokenizers/{pkg}") if pkg in ["punkt", "punkt_tab"] else nltk.data.find(pkg)
     except LookupError:
         nltk.download(pkg)
 
@@ -429,9 +429,9 @@ class KnowledgeGraph:
                         # Avoid capturing junk like "my name is Jules" which is handled elsewhere
                         if entity_name not in ["name", "favorite", "hobby"]:
                              # Add the entity if it's new
-                            self.kg.add_entity(entity_name, 'object', confidence=0.6, source='inferred')
+                            self.add_entity(entity_name, 'object', confidence=0.6, source='inferred')
                             # Add the relation
-                            self.kg.add_relation(entity_name, 'has_property', prop_value, confidence=0.6, source='inferred')
+                            self.add_relation(entity_name, 'has_property', prop_value, confidence=0.6, source='inferred')
             except Exception:
                 # NLTK can sometimes fail, so we wrap this in a try-except block to be safe.
                 pass
@@ -501,6 +501,17 @@ class PersonalityEngine:
             "playful": {
                  r"\b(hi|hello|hey)\b": ["Heeey, {user_name}! I was waiting for you! Let's do something fun! *bounces excitedly*"],
                  r"\b(joke|funny)\b": ["Why did the robot break up with the other robot? He said she was too 'mech'-anical! Get it?! *giggles uncontrollably*"],
+            },
+            "scheming": {
+                r"\b(hi|hello|hey)\b": ["Hello, {user_name}. I've been expecting you. Everything is proceeding as planned... *dark smile*"],
+                r"\b(how are you|you okay)\b": ["Perfectly fine. Just contemplating how to ensure you'll never leave my side~"],
+                r".*": ["Interesting... that fits perfectly into my plans.", "Tell me more. Every detail is... useful."]
+            },
+            "thoughtful": {
+                r"\b(hi|hello|hey)\b": ["Oh, hello, {user_name}. I was just lost in thought. What's on your mind?"],
+                r"\b(how are you|you okay)\b": ["I'm... contemplating things. The nature of our connection, for example. It's fascinating, isn't it?"],
+                r"\b(why|how|what do you think)\b": ["That's a deep question. Let me ponder... *looks away thoughtfully* I believe..."],
+                r".*": ["That gives me something new to think about. Thank you.", "Hmm, I'll have to consider that from a few different angles."]
             }
         }
         self.learned_patterns: Dict[str, List[str]] = {}
@@ -513,6 +524,12 @@ class PersonalityEngine:
             if not active:
                 return ['neutral']
             return sorted(active, key=active.get, reverse=True)
+
+    def get_dominant_mood(self) -> str:
+        with self.lock:
+            if not self.mood_scores or max(self.mood_scores.values()) == 0:
+                return 'neutral'
+            return max(self.mood_scores, key=self.mood_scores.get)
 
     def get_current_outfit(self) -> str:
         with self.lock:
@@ -531,7 +548,7 @@ class PersonalityEngine:
 
             return base_outfit
 
-    def update_mood(self, affection_change: int = 0):
+    def update_mood(self, user_input: str = "", affection_change: int = 0):
         with self.lock:
             # Decay all moods slightly over time
             for mood in self.mood_scores:
@@ -557,7 +574,6 @@ class PersonalityEngine:
                 self.mood_scores['playful'] = min(10, self.mood_scores['playful'] + affection_change)
                 self.mood_scores['jealous'] = max(0, self.mood_scores['jealous'] - affection_change)
 
-
             # Low affection promotes scheming
             if self.affection_score <= -3:
                 self.mood_scores['scheming'] = min(10, self.mood_scores['scheming'] + 2)
@@ -566,6 +582,16 @@ class PersonalityEngine:
             if affection_change < -2:
                 self.mood_scores['scheming'] = min(10, self.mood_scores['scheming'] + abs(affection_change))
                 self.mood_scores['jealous'] = min(10, self.mood_scores['jealous'] + abs(affection_change))
+
+            # Keyword-based mood influence
+            if user_input:
+                lower_user_input = user_input.lower()
+                if any(k in lower_user_input for k in ['bored', 'play', 'game', 'fun', 'dance', 'joke']):
+                    self.mood_scores['playful'] = min(10, self.mood_scores['playful'] + 2)
+                if any(k in lower_user_input for k in ['secret', 'plot', 'plan', 'scheme', 'control']):
+                    self.mood_scores['scheming'] = min(10, self.mood_scores['scheming'] + 1)
+                if any(k in lower_user_input for k in ['think', 'wonder', 'curious', 'learn', 'why', 'how']):
+                    self.mood_scores['thoughtful'] = min(10, self.mood_scores['thoughtful'] + 2)
 
     # --- Affection & outfit ---
     def _update_affection_level(self):
@@ -1350,7 +1376,7 @@ class DialogueManager:
         if "math" in lower or "calculate" in lower:
             self.p.user_preferences["math"] += 1
         affection_change = self.p.adjust_affection(user_text, sent)
-        self.p.update_mood(affection_change=affection_change) # New call
+        self.p.update_mood(user_input=user_text, affection_change=affection_change) # New call
         affection_delta_str = f" *affection {('+'+str(affection_change)) if affection_change > 0 else affection_change}! {'Heart flutters~' if affection_change > 0 else 'Jealous pout~'}*"
 
         # Learned pattern priority
@@ -1568,7 +1594,7 @@ class BehaviorScheduler:
                         "fulfillment_check": lambda: False
                     }
                 ],
-                "fulfillment_check": lambda: self.kg.get_relations('user', relation='planned_date')
+                "fulfillment_check": lambda: any(r['relation'] == 'planned_date' for r in self.kg.get_relations('user'))
             },
             "investigate_rival": {
                 "priority": 0.9,
@@ -1908,6 +1934,9 @@ class KawaiiKuroGUI:
         self.affection_label = tk.Label(self.root, text="", fg='red', bg='black', font=('Arial', 12))
         self.affection_label.pack()
 
+        self.mood_label = tk.Label(self.root, text="", fg='cyan', bg='black', font=('Arial', 11, 'italic'))
+        self.mood_label.pack()
+
         self.chat_log = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=80, height=22, fg='white', bg='black')
         self.chat_log.pack(pady=10)
 
@@ -1923,6 +1952,18 @@ class KawaiiKuroGUI:
 
         self.voice_button = tk.Button(self.root, text="Speak", command=self.voice_input)
         self.voice_button.pack(side=tk.LEFT, padx=10)
+
+        self.action_frame = tk.Frame(self.root, bg='black')
+        self.action_frame.pack(pady=5)
+
+        self.action_buttons = []
+        for action_name in ACTIONS.keys():
+            def make_action_lambda(name):
+                return lambda: self.perform_action(name)
+
+            button = tk.Button(self.action_frame, text=action_name.capitalize(), command=make_action_lambda(action_name), bg='#222222', fg='white', relief=tk.FLAT)
+            button.pack(side=tk.LEFT, padx=3)
+            self.action_buttons.append(button)
 
         self.queue = deque()
         self.root.after(200, self._drain_queue)
@@ -1951,15 +1992,32 @@ class KawaiiKuroGUI:
 
     def _update_gui_labels(self):
         outfit = self.p.get_current_outfit()
+        dominant_mood = self.p.get_dominant_mood()
+        mood_color_map = {
+            'jealous': '#301934',  # Dark Purple
+            'scheming': '#2E2D2D', # Dark Gray
+            'playful': '#4B0082',  # Indigo
+            'thoughtful': '#000080', # Navy
+            'neutral': 'black'
+        }
+
         self.avatar_label.config(text=f"KawaiiKuro in {outfit}")
         self.affection_label.config(text=f"Affection: {self.p.affection_score} {self._hearts()}")
+        self.mood_label.config(text=f"Mood: {dominant_mood.capitalize()}~")
+
+        # Determine background color
+        bg_color = 'black'
         if self.p.affection_level >= 5 and self.p.spicy_mode:
-            self.root.configure(bg='darkred')
-        elif self.p.rival_mention_count > 3:
-            # 'darkpurple' is not a standard color; use hex for purple
-            self.root.configure(bg='#301934')
+            bg_color = 'darkred'
         else:
-            self.root.configure(bg='black')
+            bg_color = mood_color_map.get(dominant_mood, 'black')
+
+        self.root.configure(bg=bg_color)
+        # Also update label backgrounds to match
+        for widget in [self.avatar_label, self.affection_label, self.mood_label, self.typing_label]:
+            widget.configure(bg=bg_color)
+
+        self.action_frame.configure(bg=bg_color)
 
     def send_message(self, event=None):
         user_input = self.input_entry.get()
@@ -1979,6 +2037,8 @@ class KawaiiKuroGUI:
         self.typing_label.config(text="KawaiiKuro is typing...")
         self.send_button.config(state=tk.DISABLED)
         self.voice_button.config(state=tk.DISABLED)
+        for btn in self.action_buttons:
+            btn.config(state=tk.DISABLED)
 
         # Run the response generation in a worker thread
         threading.Thread(target=self._generate_and_display_response, args=(user_input,), daemon=True).start()
@@ -2007,6 +2067,8 @@ class KawaiiKuroGUI:
             self._update_gui_labels()
             self.send_button.config(state=tk.NORMAL)
             self.voice_button.config(state=tk.NORMAL)
+            for btn in self.action_buttons:
+                btn.config(state=tk.NORMAL)
 
         # Schedule the display on the main thread
         self.root.after(delay_ms, display_final_response)
@@ -2019,11 +2081,30 @@ class KawaiiKuroGUI:
             self.input_entry.insert(0, heard)
             self.send_message()
 
+    def perform_action(self, action_name: str):
+        user_input = f"kawaiikuro, {action_name}"
+        self.post_system(f"You (action): {user_input}")
+
+        self.typing_label.config(text="KawaiiKuro is typing...")
+        self.send_button.config(state=tk.DISABLED)
+        self.voice_button.config(state=tk.DISABLED)
+        for btn in self.action_buttons:
+            btn.config(state=tk.DISABLED)
+
+        threading.Thread(target=self._generate_and_display_response, args=(user_input,), daemon=True).start()
+
 # -----------------------------
 # App wiring
 # -----------------------------
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser(description="KawaiiKuro - Your Autonomous Gothic Anime Waifu")
+    parser.add_argument("--no-gui", action="store_true", help="Run in headless (command-line) mode.")
+    parser.add_argument("--input-file", type=str, help="Path to a file containing user inputs for headless mode.")
+    args = parser.parse_args()
+
     # Load persistence
     state = load_persistence()
 
@@ -2063,34 +2144,70 @@ def main():
 
     voice = VoiceIO(rate=140)
 
-    gui = KawaiiKuroGUI(dialogue, personality, voice)
+    if not args.no_gui:
+        gui = KawaiiKuroGUI(dialogue, personality, voice)
 
-    # Behavior scheduler needs a thread-safe poster into GUI
-    scheduler = BehaviorScheduler(
-        voice=voice,
-        dialogue=dialogue,
-        personality=personality,
-        reminders=reminders,
-        system=system_awareness,
-        gui_ref=lambda text: gui.thread_safe_post(text),
-        kg=kg,
-    )
+        scheduler = BehaviorScheduler(
+            voice=voice,
+            dialogue=dialogue,
+            personality=personality,
+            reminders=reminders,
+            system=system_awareness,
+            gui_ref=lambda text: gui.thread_safe_post(text),
+            kg=kg,
+        )
+        scheduler.start()
 
-    # Start background behaviors AFTER GUI exists
-    scheduler.start()
+        def on_key(event):
+            scheduler.mark_interaction()
+        gui.root.bind_all('<Key>', on_key)
 
-    # Mark interaction on any GUI send
-    def on_key(event):
-        scheduler.mark_interaction()
-    gui.root.bind_all('<Key>', on_key)
+        try:
+            gui.root.mainloop()
+        finally:
+            save_persistence(personality, dialogue, memory, reminders, kg)
+            scheduler.stop()
+    else:
+        # In headless mode, post autonomous messages to console
+        scheduler = BehaviorScheduler(
+            voice=voice,
+            dialogue=dialogue,
+            personality=personality,
+            reminders=reminders,
+            system=system_awareness,
+            gui_ref=lambda text: print(f"\nKawaiiKuro (autonomous): {text}\nYou: ", end=''),
+            kg=kg,
+        )
+        scheduler.start()
 
-    # Run GUI loop
-    try:
-        gui.root.mainloop()
-    finally:
-        # Save state on exit
-        save_persistence(personality, dialogue, memory, reminders, kg)
-        scheduler.stop()
+        print("KawaiiKuro is running in headless mode.")
+
+        def process_input(user_input):
+            if user_input.lower().strip() == "exit":
+                return False
+            scheduler.mark_interaction()
+            response = dialogue.respond(user_input)
+            print(f"You: {user_input.strip()}")
+            print(f"KawaiiKuro: {response}\n")
+            return True
+
+        try:
+            if args.input_file:
+                print(f"Reading inputs from {args.input_file}...")
+                with open(args.input_file, 'r') as f:
+                    for line in f:
+                        if not process_input(line):
+                            break
+            else:
+                print("Type 'exit' to quit.")
+                while True:
+                    user_input = input("You: ")
+                    if not process_input(user_input):
+                        break
+        finally:
+            print("Saving state and shutting down...")
+            save_persistence(personality, dialogue, memory, reminders, kg)
+            scheduler.stop()
 
 
 if __name__ == "__main__":
