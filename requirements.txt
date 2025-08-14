@@ -3,3 +3,4 @@ scikit-learn
 pyttsx3
 SpeechRecognition
 pocketsphinx
+psutil

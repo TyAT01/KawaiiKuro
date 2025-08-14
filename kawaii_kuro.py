@@ -60,6 +60,11 @@ try:
 except Exception:
     sr = None
 
+try:
+    import psutil
+except Exception:
+    psutil = None
+
 import tkinter as tk
 from tkinter import scrolledtext
 
@@ -68,13 +73,15 @@ import nltk
 from nltk.tokenize import word_tokenize
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from nltk import pos_tag
+from nltk.corpus import stopwords
 
 # Vectorizer for semantic recall
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.decomposition import LatentDirichletAllocation
 
 # Ensure NLTK data
-for pkg in ["punkt", "vader_lexicon", "averaged_perceptron_tagger"]:
+for pkg in ["punkt", "vader_lexicon", "averaged_perceptron_tagger", "stopwords"]:
     try:
         nltk.data.find(f"tokenizers/{pkg}") if pkg == "punkt" else nltk.data.find(pkg)
     except LookupError:
@@ -244,8 +251,10 @@ class PersonalityEngine:
         self.rival_names = set()
         self.user_preferences = Counter()
         self.user_facts: Dict[str, Any] = {}
-        self.positive_keywords: set[str] = set()
-        self.mood: str = 'neutral'
+        self.learned_topics: List[List[str]] = []
+        self.mood_scores: Dict[str, int] = {
+            'playful': 0, 'jealous': 0, 'scheming': 0, 'thoughtful': 0
+        }
         self.outfits = dict(OUTFITS_BASE)
         self.lock = threading.Lock()
         # base responses retained from original, trimmed for brevity but same style
@@ -273,28 +282,32 @@ class PersonalityEngine:
         }
         self.learned_patterns: Dict[str, List[str]] = {}
 
+    def get_dominant_mood(self) -> str:
+        with self.lock:
+            # If all scores are low, she's neutral
+            if all(s < 3 for s in self.mood_scores.values()):
+                return 'neutral'
+            # Return the key with the highest value
+            return max(self.mood_scores, key=self.mood_scores.get)
+
     def update_mood(self):
         with self.lock:
-            moods = ['neutral', 'playful', 'scheming', 'thoughtful', 'jealous']
-            weights = [5, 0, 0, 0, 0]  # Start with neutral
+            # Decay all moods slightly over time
+            for mood in self.mood_scores:
+                self.mood_scores[mood] = max(0, self.mood_scores[mood] - 1)
 
+            # Update scores based on current state
             if self.rival_mention_count > 2:
-                weights[moods.index('jealous')] = 5
+                self.mood_scores['jealous'] = min(10, self.mood_scores['jealous'] + 3)
 
             if self.affection_score >= 8:
-                weights[moods.index('playful')] = 5
+                self.mood_scores['playful'] = min(10, self.mood_scores['playful'] + 2)
 
             if self.affection_score <= -3:
-                weights[moods.index('scheming')] = 4
+                self.mood_scores['scheming'] = min(10, self.mood_scores['scheming'] + 2)
 
             if self.affection_score > 4 and len(self.user_facts) > 1:
-                weights[moods.index('thoughtful')] = 3
-
-            # If no other mood is strongly indicated, it stays neutral
-            if sum(weights[1:]) == 0:
-                self.mood = 'neutral'
-            else:
-                self.mood = random.choices(moods, weights=weights, k=1)[0]
+                self.mood_scores['thoughtful'] = min(10, self.mood_scores['thoughtful'] + 1)
 
     # --- Affection & outfit ---
     def _update_affection_level(self):
@@ -356,6 +369,44 @@ class PersonalityEngine:
     def is_chaotic_trigger(self, lower_text: str) -> bool:
         chaotic_keywords = r"\b(she|he|they|friend|someone|person|other|rival|ex|crush|date|talk to|meet|hang out with)\b"
         return re.search(chaotic_keywords, lower_text, re.IGNORECASE) is not None
+
+# -----------------------------
+# System Awareness
+# -----------------------------
+class SystemAwareness:
+    def __init__(self):
+        self.last_battery_warning_time = 0
+
+    def get_time_of_day_greeting(self) -> Optional[str]:
+        hour = datetime.now().hour
+        if 5 <= hour < 12:
+            return "Good morning, my love~ Did you sleep well?"
+        if 12 <= hour < 17:
+            return "Good afternoon~ Hope you're having a great day."
+        if 17 <= hour < 22:
+            return "Good evening~ Time to relax with me."
+        if 22 <= hour or hour < 5:
+            return "It's getting late~ You should be resting, but I'm glad you're with me."
+        return None
+
+    def get_battery_status(self) -> Optional[str]:
+        if not psutil:
+            return None
+
+        now = time.time()
+        # Avoid spamming battery warnings
+        if now - self.last_battery_warning_time < 3600: # 1 hour
+            return None
+
+        try:
+            battery = psutil.sensors_battery()
+            if battery and not battery.power_plugged and battery.percent < 25:
+                self.last_battery_warning_time = now
+                return f"Your battery is at {battery.percent}%! Don't forget to plug in, my love~"
+        except Exception:
+            # sensors_battery() can fail on desktops
+            return None
+        return None
 
 # -----------------------------
 # Reminders & Scheduling
@@ -511,7 +562,7 @@ class DialogueManager:
 
     def predict_task(self) -> Optional[str]:
         # This function becomes much more interesting with moods
-        mood = self.p.mood
+        mood = self.p.get_dominant_mood()
 
         if mood == 'scheming':
             return "Let's make a promise. Just you and me, forever. No one else. Ever. Agree?"
@@ -543,6 +594,13 @@ class DialogueManager:
                 return "Morning, love~ *yawns cutely* Need a wake-up nudge?"
         if self.p.rival_mention_count > 2:
             return "Too many rivals lately~ *jealous pout* Let’s plan a special moment, just us~ *schemes*"
+
+        # Proactive question about a learned topic
+        if self.p.learned_topics and random.random() < 0.2: # 20% chance to ask about a topic
+            topic = random.choice(self.p.learned_topics)
+            topic_name = topic[0] # Use the most prominent word as the topic name
+            return f"I've noticed we talk about {topic_name} a bit. What are your thoughts on it right now?"
+
         return None
 
     def respond(self, user_text: str) -> str:
@@ -572,14 +630,49 @@ class DialogueManager:
         if lower == "reminders":
             return self.r.list_active()
         if lower == "memory":
-            # pretty memory dump
-            data = self.m.to_list()[-20:]
-            if not data:
-                return "No shared memories yet~ Let's make some!"
-            parts = []
-            for e in data:
-                parts.append(f"You ({e['timestamp']}): {e['user']}\nKawaiiKuro: {e['response']}")
-            return "\n".join(parts)
+            with self.m.lock, self.p.lock: # Ensure thread safety
+                memories = self.m.to_list()
+                if not memories:
+                    return "We haven't made any memories yet~ Let's change that!"
+
+                # 1. First met
+                first_memory_time_str = memories[0]['timestamp']
+                first_met_dt = datetime.strptime(first_memory_time_str, '%Y-%m-%d %H:%M:%S')
+                first_met_formatted = first_met_dt.strftime('%B %d, %Y')
+
+                # 2. Affection
+                affection_score = self.p.affection_score
+
+                # 3. Main topics
+                all_user_text = " ".join([m['user'] for m in memories])
+                tokens = word_tokenize(all_user_text.lower())
+                tagged = pos_tag(tokens)
+
+                stop_words = set(stopwords.words('english'))
+                nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in stop_words]
+                topic_counter = Counter(nouns)
+                top_topics = [topic for topic, count in topic_counter.most_common(3)]
+
+                # 4. Build the summary
+                summary = [f"*I've been keeping a diary of our time together, my love~*"]
+                summary.append(f"- We first met on {first_met_formatted}.")
+                summary.append(f"- My current affection for you is {affection_score}. {'*my heart flutters for you~*' if affection_score > 5 else ''}")
+
+                if top_topics:
+                    summary.append(f"- We seem to talk a lot about: {', '.join(top_topics)}.")
+                else:
+                    summary.append("- I'm still learning about your interests~ Tell me more!")
+
+                if self.p.user_facts:
+                    fact_summary = []
+                    if 'name' in self.p.user_facts:
+                        fact_summary.append(f"I know your name is {self.p.user_facts['name']}.")
+                    if 'likes' in self.p.user_facts:
+                         fact_summary.append(f"I remember you like {', '.join(self.p.user_facts['likes'])}.")
+                    if fact_summary:
+                        summary.append("- " + " ".join(fact_summary))
+
+                return "\n".join(summary)
 
         taught = self.handle_teach(user_text)
         if taught is not None:
@@ -633,17 +726,17 @@ class DialogueManager:
             self.add_memory(user_text, resp, affection_change=affection_change)
             return resp
 
-        # Learned positive keyword recall
-        if self.p.positive_keywords:
+        # Learned topic recall
+        if self.p.learned_topics:
             tokens = set(word_tokenize(lower))
-            matched_keywords = tokens.intersection(self.p.positive_keywords)
-            if matched_keywords and sent.get('compound', 0) >= -0.2: # Avoid using on very negative statements
-                keyword = matched_keywords.pop()
-                resp = f"You mentioned {keyword}~ I remember that's a topic that makes you happy! *smiles sweetly*"
-                resp += affection_delta_str # Still add the current affection change
-                resp = self.personalize_response(resp)
-                self.add_memory(user_text, resp, affection_change=affection_change)
-                return resp
+            for topic in self.p.learned_topics:
+                if len(tokens.intersection(set(topic))) >= 2: # Match 2+ words
+                    topic_name = topic[0]
+                    resp = f"This reminds me of how we talk about {topic_name}~ It's one of my favorite subjects with you."
+                    resp += affection_delta_str
+                    resp = self.personalize_response(resp)
+                    self.add_memory(user_text, resp, affection_change=affection_change)
+                    return resp
 
         # Pattern responses (normal mode)
         chosen = None
@@ -678,10 +771,13 @@ class DialogueManager:
         chosen += affection_delta_str
 
         # Add mood-based flavor text
-        if self.p.mood == 'jealous' and 'you' in chosen.lower():
+        mood = self.p.get_dominant_mood()
+        if mood == 'jealous' and self.p.mood_scores['jealous'] > 5:
              chosen += " ...and you're MINE."
-        elif self.p.mood == 'playful':
+        elif mood == 'playful' and self.p.mood_scores['playful'] > 5:
              chosen += " *giggles and winks*"
+        elif mood == 'scheming':
+             chosen += " *a dark thought crosses my mind...*"
 
         chosen = self.personalize_response(chosen)
         self.add_memory(user_text, chosen, affection_change=affection_change)
@@ -691,11 +787,12 @@ class DialogueManager:
 # Behavior Scheduler (threads)
 # -----------------------------
 class BehaviorScheduler:
-    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, gui_ref):
+    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref):
         self.voice = voice
         self.dm = dialogue
         self.p = personality
         self.r = reminders
+        self.system = system
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
         self.stop_flag = threading.Event()
@@ -729,8 +826,25 @@ class BehaviorScheduler:
             time.sleep(1)
 
     def _idle_loop(self):
+        time_greeting_posted = False
         while not self.stop_flag.is_set():
-            if time.time() - self.last_interaction_time > IDLE_THRESHOLD_SEC:
+            now = time.time()
+            hour = datetime.now().hour
+
+            # --- System Awareness Checks ---
+            battery_msg = self.system.get_battery_status()
+            if battery_msg:
+                self._post_gui(f"KawaiiKuro: {battery_msg}")
+
+            if not time_greeting_posted:
+                time_greeting = self.system.get_time_of_day_greeting()
+                if time_greeting:
+                    self._post_gui(f"KawaiiKuro: {time_greeting}")
+                    time_greeting_posted = True # Only show once per session
+
+            # --- Idle Check ---
+            if now - self.last_interaction_time > IDLE_THRESHOLD_SEC:
+                mood = self.p.get_dominant_mood()
                 # Generate idle message based on mood
                 idle_messages = {
                     'jealous': "Thinking about other people again? *glares* Don't forget who you belong to.",
@@ -740,19 +854,28 @@ class BehaviorScheduler:
                     'neutral': "Miss you, darling~ *pouts* Come back?",
                 }
                 # Fallback for thoughtful if no likes are known
-                if self.p.mood == 'thoughtful' and not self.p.user_facts.get('likes'):
+                if mood == 'thoughtful' and not self.p.user_facts.get('likes'):
                     message = "Just thinking about you... and what you might be hiding from me~"
                 else:
-                    message = idle_messages.get(self.p.mood, idle_messages['neutral'])
+                    message = idle_messages.get(mood, idle_messages['neutral'])
 
                 self._post_gui(f"KawaiiKuro: {message}")
                 self.p.affection_score = max(-10, self.p.affection_score - 1)
                 self.p._update_affection_level()
+                self.mark_interaction() # Reset idle timer after she speaks
 
-            # proactive tasks are now also mood-dependent
-            task = self.dm.predict_task() # This will be modified to use mood
-            if task and self.p.affection_score > 3:
-                self._post_gui(f"KawaiiKuro: {task}")
+            # --- Proactive Task Prediction ---
+            # Daily energy cycle: less proactive late at night
+            is_sleepy_time = hour >= 23 or hour < 6
+            proactive_chance = 0.3 if is_sleepy_time else 0.8
+
+            if self.p.affection_score > 3 and random.random() < proactive_chance:
+                task = self.dm.predict_task()
+                if task:
+                    self._post_gui(f"KawaiiKuro: {task}")
+                    # Avoid spamming tasks
+                    time.sleep(AUTO_BEHAVIOR_PERIOD_SEC * 2)
+
             time.sleep(AUTO_BEHAVIOR_PERIOD_SEC)
 
     def _mood_update_loop(self):
@@ -762,22 +885,39 @@ class BehaviorScheduler:
 
     def _auto_learn_loop(self):
         while not self.stop_flag.is_set():
+            time.sleep(AUTO_LEARN_PERIOD_SEC) # Sleep first, learn periodically
+
             with self.dm.m.lock, self.p.lock:
-                # Find interactions with high affection gain
-                high_affection_entries = [e for e in self.dm.m.entries if e.affection_change >= 3]
+                all_user_text = [entry.user for entry in self.dm.m.entries if len(entry.user.split()) > 4]
 
-                for entry in high_affection_entries:
-                    # Extract keywords (nouns)
-                    tokens = word_tokenize(entry.user.lower())
-                    tagged = pos_tag(tokens)
+                if len(all_user_text) < 10: # Not enough data to learn topics
+                    continue
 
-                    # Nouns (NN, NNS) are good candidates for topics
-                    keywords = {word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 2}
+                try:
+                    vectorizer = CountVectorizer(max_df=0.9, min_df=2, stop_words='english', max_features=1000)
+                    tf = vectorizer.fit_transform(all_user_text)
+                    feature_names = vectorizer.get_feature_names_out()
 
-                    # Add to personality's learned keywords
-                    self.p.positive_keywords.update(keywords)
+                    n_topics = min(3, len(all_user_text) // 5) # adaptive number of topics
+                    if n_topics == 0:
+                        continue
 
-            time.sleep(AUTO_LEARN_PERIOD_SEC)
+                    lda = LatentDirichletAllocation(n_components=n_topics, max_iter=10, learning_method='online', learning_offset=50., random_state=0)
+                    lda.fit(tf)
+
+                    new_topics = []
+                    n_top_words = 5
+                    for topic_idx, topic_dist in enumerate(lda.components_):
+                        top_words_indices = topic_dist.argsort()[:-n_top_words - 1:-1]
+                        topic_words = [feature_names[i] for i in top_words_indices]
+                        new_topics.append(topic_words)
+
+                    self.p.learned_topics = new_topics
+                    self._post_gui("KawaiiKuro: *takes some nerdy notes on our conversations* I feel like I understand you better now~", speak=False)
+
+                except Exception:
+                    # Topic modeling can be fragile, fail gracefully
+                    pass # Silently ignore learning errors
 
     def _auto_save_loop(self):
         while not self.stop_flag.is_set():
@@ -816,8 +956,8 @@ def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManage
         'rival_names': list(p.rival_names),
         'user_preferences': dict(p.user_preferences),
         'user_facts': p.user_facts,
-        'positive_keywords': list(p.positive_keywords),
-        'mood': p.mood,
+        'learned_topics': p.learned_topics,
+        'mood_scores': p.mood_scores,
         'learned_patterns': dm.learned_patterns,
         'memory': mm.to_list(),
         'reminders': rem.reminders,
@@ -939,8 +1079,8 @@ def main():
     personality.rival_names = set(state.get('rival_names', []))
     personality.user_preferences = Counter(state.get('user_preferences', {}))
     personality.user_facts = state.get('user_facts', {})
-    personality.positive_keywords = set(state.get('positive_keywords', []))
-    personality.mood = state.get('mood', 'neutral')
+    personality.learned_topics = state.get('learned_topics', [])
+    personality.mood_scores = state.get('mood_scores', {'playful': 0, 'jealous': 0, 'scheming': 0, 'thoughtful': 0})
     personality._update_affection_level()
 
     memory = MemoryManager()
@@ -953,6 +1093,7 @@ def main():
             reminders.reminders.append(r)
 
     math_eval = MathEvaluator()
+    system_awareness = SystemAwareness()
 
     dialogue = DialogueManager(personality, memory, reminders, math_eval)
     # restore learned patterns
@@ -970,6 +1111,7 @@ def main():
         dialogue=dialogue,
         personality=personality,
         reminders=reminders,
+        system=system_awareness,
         gui_ref=lambda text: gui.thread_safe_post(text)
     )
 
