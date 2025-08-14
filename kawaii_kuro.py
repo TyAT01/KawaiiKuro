@@ -868,19 +868,49 @@ class DialogueManager:
         if triggered_keyword:
             statement = text[len(triggered_keyword):].strip()
 
-            # --- Handle positive corrections (updating/adding facts) ---
+            # --- Handle complex negative corrections first ("X is not Y, it's Z") ---
+            m_not_something = re.search(r"my ([\w\s]+?) is not ([\w\s]+)", statement, re.I)
+            if m_not_something:
+                key_phrase = m_not_something.group(1).lower().strip()
+                value_to_remove = m_not_something.group(2).strip().lower()
+
+                relation_to_remove = key_phrase.replace(' ', '_')
+                if key_phrase.startswith("favorite "):
+                    topic = key_phrase.split(" ", 1)[1]
+                    relation_to_remove = f"favorite_{topic}"
+
+                self.kg.remove_relation('user', relation_to_remove, value_to_remove)
+
+                # Check for the positive assertion immediately following
+                rest_of_statement = statement[m_not_something.end():].strip()
+                m_positive = re.match(r"[,;]?\s*(?:but|it's|it is)\s+([\w\s]+)", rest_of_statement, re.I)
+                if m_positive:
+                    new_value = m_positive.group(1).strip().lower()
+                    # Re-use the same relation key we just derived
+                    self.kg.add_relation('user', relation_to_remove, new_value)
+                    return f"Got it. Your {key_phrase} is not {value_to_remove}, it's {new_value}. I'll remember that~ *corrects notes*"
+
+                # If no positive part, just confirm the removal
+                return f"Got it. I've made a note that your {key_phrase} is not {value_to_remove}. Thanks for the correction!"
+
+            # --- Handle simple negative corrections ("I don't like X") ---
+            m_dislike = re.search(r"i don't like ([\w\s]+)", statement, re.I)
+            if m_dislike:
+                item_to_remove = m_dislike.group(1).strip().lower()
+                self.kg.remove_relation('user', 'likes', item_to_remove)
+                return f"Oh, okay! My mistake. I'll remember you don't like {item_to_remove}."
+
+            # --- If no negative patterns, handle as a positive correction ---
             fact = self.parse_fact(statement)
             if fact:
                 key, value = fact
                 key_fmt = key.replace('_', ' ')
 
-                # Special handling for 'likes' - corrections usually add, not replace.
                 if key == 'likes':
                     self.kg.add_entity(value.lower(), 'interest', confidence=1.0, source='stated')
                     self.kg.add_relation('user', 'likes', value.lower(), confidence=1.0, source='stated')
                     return f"Ah, I see! My mistake. I'll remember you also like {value}. *takes a note*"
 
-                # For attributes and favorites, we replace the old value.
                 if key.startswith('favorite_'):
                     self.kg.remove_relation('user', key) # Remove all of this favorite type
                     self.kg.add_entity(value.lower(), key.replace('favorite_', ''), confidence=1.0, source='stated')
@@ -891,31 +921,7 @@ class DialogueManager:
 
                 return f"Got it, thanks for the correction! I've updated my notes: your {key_fmt} is {value}. *blushes slightly*"
 
-            # --- Handle negative corrections (removing facts) ---
-            m_dislike = re.search(r"i don't like ([\w\s]+)", statement, re.I)
-            if m_dislike:
-                item_to_remove = m_dislike.group(1).strip().lower()
-                # Remove the 'likes' relation from the KG
-                self.kg.remove_relation('user', 'likes', item_to_remove)
-                return f"Oh, okay! My mistake. I'll remember you don't like {item_to_remove}."
-
-            m_not_something = re.search(r"my (\w+) is not ([\w\s]+)", statement, re.I)
-            if m_not_something:
-                key_phrase = m_not_something.group(1).lower()
-                value_to_remove = m_not_something.group(2).strip().lower()
-
-                # Try to match the key phrase to a relation type in the KG
-                # e.g., "favorite color" -> "favorite_color"
-                relation_to_remove = key_phrase.replace(' ', '_')
-                if key_phrase.startswith("favorite "):
-                    topic = key_phrase.split(" ", 1)[1]
-                    relation_to_remove = f"favorite_{topic}"
-
-                # Remove the specific relation from the KG
-                self.kg.remove_relation('user', relation_to_remove, value_to_remove)
-                return f"Got it. I've made a note that your {key_phrase} is not {value_to_remove}. Thanks for the correction!"
-
-            # If no specific correction pattern was matched, just acknowledge.
+            # If no specific pattern was matched, just acknowledge.
             return "My apologies. I'll try to be more careful."
         return None
 
@@ -1313,6 +1319,15 @@ class DialogueManager:
             if len(summary) == 1: # Only the intro text was added
                  return "We're still getting to know each other, my love~ Tell me something about you!"
 
+            # Enhancement: Add a concluding remark based on how much she knows
+            num_facts = len(summary) - 1
+            if num_facts > 5:
+                summary.append("\nI feel like I know you so well already~ *happy blush*")
+            elif num_facts > 2:
+                summary.append("\nI love learning about you~ Tell me more sometime!")
+            else:
+                summary.append("\nI'm still learning about you, and I'm eager to know everything~")
+
             return self.personalize_response("\n".join(summary))
 
         if lower == "reminders":
@@ -1579,6 +1594,7 @@ class BehaviorScheduler:
         self.last_interaction_time = time.time()
         self.stop_flag = threading.Event()
         self.already_commented_on_process = set()
+        self.lock = threading.Lock()
 
         self.goals = {
             "learn_user_basics": {
@@ -1647,6 +1663,7 @@ class BehaviorScheduler:
                     },
                     {
                         "action": "Perfect! It's a date then! I can't wait~ *giggles excitedly*",
+                        "side_effect": lambda: self.kg.add_relation('user', 'planned_date', 'true', confidence=1.0, source='goal_system'),
                         "fulfillment_check": lambda: False
                     }
                 ],
@@ -1732,7 +1749,8 @@ class BehaviorScheduler:
                         self.active_goals.append({
                             "name": name,
                             "priority": goal['priority'],
-                            "action": step['action']
+                            "action": step['action'],
+                            "side_effect": step.get('side_effect')
                         })
 
         # Sort by priority, highest first
@@ -1747,6 +1765,7 @@ class BehaviorScheduler:
         threading.Thread(target=self._auto_learn_loop, daemon=True).start()
         threading.Thread(target=self._auto_save_loop, daemon=True).start()
         threading.Thread(target=self._mood_update_loop, daemon=True).start()
+        threading.Thread(target=self._system_awareness_loop, daemon=True).start()
         if self.voice and self.voice.recognizer is not None:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
 
@@ -1773,22 +1792,6 @@ class BehaviorScheduler:
             hour = datetime.now().hour
 
             # --- System Awareness Checks ---
-            # New process check - low probability to avoid performance issues
-            if psutil and random.random() < 0.1:
-                try:
-                    running_processes = {p.name().lower() for p in psutil.process_iter(['name'])}
-                    for category, (procs, comment) in KNOWN_PROCESSES.items():
-                        if category not in self.already_commented_on_process:
-                            for proc_name in procs:
-                                if proc_name in running_processes:
-                                    self._post_gui(f"KawaiiKuro: {comment}")
-                                    self.already_commented_on_process.add(category)
-                                    # Avoid commenting on multiple categories in the same loop
-                                    break
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    # It's possible for a process to terminate while iterating, ignore these errors
-                    pass
-
             battery_msg = self.system.get_battery_status()
             if battery_msg:
                 self._post_gui(f"KawaiiKuro: {battery_msg}")
@@ -1838,6 +1841,11 @@ class BehaviorScheduler:
                 if random.random() < top_goal['priority']:
                     action = top_goal['action']
                     action_text = action() if callable(action) else action
+
+                    # Execute side effect if it exists
+                    if top_goal.get('side_effect'):
+                        top_goal['side_effect']()
+
                     self._post_gui(f"KawaiiKuro: {action_text}")
                     self.mark_interaction() # She initiated, so reset idle timer
 
@@ -1845,6 +1853,28 @@ class BehaviorScheduler:
                     time.sleep(AUTO_BEHAVIOR_PERIOD_SEC * 3)
 
             time.sleep(AUTO_BEHAVIOR_PERIOD_SEC)
+
+    def _system_awareness_loop(self):
+        while not self.stop_flag.is_set():
+            # Using a longer, fixed period for this check to balance performance and reliability
+            time.sleep(JEALOUSY_CHECK_PERIOD_SEC)
+            if not psutil:
+                continue
+
+            try:
+                running_processes = {p.name().lower() for p in psutil.process_iter(['name'])}
+                with self.lock:
+                    for category, (procs, comment_template) in KNOWN_PROCESSES.items():
+                        if category not in self.already_commented_on_process:
+                            for proc_name in procs:
+                                if proc_name in running_processes:
+                                    personalized_comment = self.dm.personalize_response(comment_template)
+                                    self._post_gui(f"KawaiiKuro: {personalized_comment}")
+                                    self.already_commented_on_process.add(category)
+                                    # Break to avoid commenting on multiple categories in one go
+                                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
 
     def _mood_update_loop(self):
         while not self.stop_flag.is_set():
@@ -1984,8 +2014,14 @@ class KawaiiKuroGUI:
         self.affection_label = tk.Label(self.root, text="", fg='red', bg='black', font=('Arial', 12))
         self.affection_label.pack()
 
-        self.mood_label = tk.Label(self.root, text="", fg='cyan', bg='black', font=('Arial', 11, 'italic'))
-        self.mood_label.pack()
+        self.mood_frame = tk.Frame(self.root, bg='black')
+        self.mood_frame.pack(pady=2)
+        self.mood_canvas = tk.Canvas(self.mood_frame, width=20, height=20, bg='black', highlightthickness=0)
+        self.mood_canvas.pack(side=tk.LEFT, padx=5)
+        self.mood_indicator = self.mood_canvas.create_oval(2, 2, 18, 18, fill='cyan', outline='white', width=2)
+        self.mood_label = tk.Label(self.mood_frame, text="", fg='cyan', bg='black', font=('Arial', 11, 'italic'))
+        self.mood_label.pack(side=tk.LEFT)
+
 
         self.chat_log = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=80, height=22, fg='white', bg='black')
         self.chat_log.pack(pady=10)
@@ -2051,6 +2087,9 @@ class KawaiiKuroGUI:
             'neutral': 'black'
         }
 
+        mood_indicator_color = mood_color_map.get(dominant_mood, 'cyan')
+        self.mood_canvas.itemconfig(self.mood_indicator, fill=mood_indicator_color)
+
         self.avatar_label.config(text=f"KawaiiKuro in {outfit}")
         self.affection_label.config(text=f"Affection: {self.p.affection_score} {self._hearts()}")
         self.mood_label.config(text=f"Mood: {dominant_mood.capitalize()}~")
@@ -2064,7 +2103,7 @@ class KawaiiKuroGUI:
 
         self.root.configure(bg=bg_color)
         # Also update label backgrounds to match
-        for widget in [self.avatar_label, self.affection_label, self.mood_label, self.typing_label]:
+        for widget in [self.avatar_label, self.affection_label, self.mood_label, self.typing_label, self.mood_frame, self.mood_canvas]:
             widget.configure(bg=bg_color)
 
         self.action_frame.configure(bg=bg_color)
