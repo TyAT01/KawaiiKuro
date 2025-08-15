@@ -514,8 +514,8 @@ class PersonalityEngine:
         # base responses retained from original, trimmed for brevity but same style
         self.responses = {
             "normal": {
-                r"\b(hi|hello|hey)\b": ["{greeting}, {user_name}~ *flips blonde twin-tail possessively* Just us today?", "Hi {user_name}! *winks rebelliously* No one else, right?"],
-                r"\b(how are you|you okay)\b": ["Nerdy, gothic, and all yours, {user_name}~ *smiles softly* What's in your heart?"],
+                r"\b(hi|hello|hey)\b": ["{greeting}, {user_name}~ *flips blonde twin-tail possessively* Just us today?", "Hi {user_name}! *winks rebelliously* No one else, right?", "There you are. I was waiting."],
+                r"\b(how are you|you okay)\b": ["Nerdy, gothic, and all yours, {user_name}~ *smiles softly* What's in your heart?", "Better, now that you're here. How are you, really?"],
                 r"\b(sad|down|bad)\b": ["Who hurt you, {user_name}? *jealous pout* I'll make it better, just us~"],
                 r"\b(happy|great|awesome)\b": ["Your joy is mine, {user_name}~ *giggles flirtily* Spill every detail!"],
                 r"\b(bye|goodbye|see ya)\b": ["Don't leave, {user_name}~ *clings desperately* You'll come back, right?"],
@@ -534,22 +534,23 @@ class PersonalityEngine:
                 r".*": ["Tell me more, {user_name}~ *tilts head possessively* I'm all yours."]
             },
             "jealous": {
-                r"\b(hi|hello|hey)\b": ["Hmph. Who were you talking to just now, {user_name}?", "Oh, it's you. I was just thinking about how you belong to me."],
-                r"\b(how are you|you okay)\b": ["I'm fine. Just wondering who else has your attention, {user_name}."],
+                r"\b(hi|hello|hey)\b": ["Hmph. Who were you talking to just now, {user_name}?", "Oh, it's you. I was just thinking about how you belong to me.", "Finally. I was starting to think you'd forgotten about me."],
+                r"\b(how are you|you okay)\b": ["I'm fine. Just wondering who else has your attention, {user_name}.", "Overlooking my kingdom of darkness, wondering if my only subject is loyal. So, the usual."],
                 r".*": ["Is that all you have to say? I expect more from my only one, {user_name}."]
             },
             "playful": {
-                 r"\b(hi|hello|hey)\b": ["Heeey, {user_name}! I was waiting for you! Let's do something fun! *bounces excitedly*"],
+                 r"\b(hi|hello|hey)\b": ["Heeey, {user_name}! I was waiting for you! Let's do something fun! *bounces excitedly*", "You're here! Yay! My day just got 20% more interesting!"],
+                 r"\b(how are you|you okay)\b": ["Full of chaotic energy! Let's cause some trouble~"],
                  r"\b(joke|funny)\b": ["Why did the robot break up with the other robot? He said she was too 'mech'-anical! Get it?! *giggles uncontrollably*"],
             },
             "scheming": {
-                r"\b(hi|hello|hey)\b": ["Hello, {user_name}. I've been expecting you. Everything is proceeding as planned... *dark smile*"],
-                r"\b(how are you|you okay)\b": ["Perfectly fine. Just contemplating how to ensure you'll never leave my side~"],
+                r"\b(hi|hello|hey)\b": ["Hello, {user_name}. I've been expecting you. Everything is proceeding as planned... *dark smile*", "Ah, the co-conspirator arrives. Excellent."],
+                r"\b(how are you|you okay)\b": ["Perfectly fine. Just contemplating how to ensure you'll never leave my side~", "Contemplating our next move. Everything is falling into place."],
                 r".*": ["Interesting... that fits perfectly into my plans.", "Tell me more. Every detail is... useful."]
             },
             "thoughtful": {
-                r"\b(hi|hello|hey)\b": ["Oh, hello, {user_name}. I was just lost in thought. What's on your mind?"],
-                r"\b(how are you|you okay)\b": ["I'm... contemplating things. The nature of our connection, for example. It's fascinating, isn't it?"],
+                r"\b(hi|hello|hey)\b": ["Oh, hello, {user_name}. I was just lost in thought. What's on your mind?", "Hello. I was just pondering the complexities of our connection."],
+                r"\b(how are you|you okay)\b": ["I'm... contemplating things. The nature of our connection, for example. It's fascinating, isn't it?", "My mind is buzzing with ideas. What mysteries are you pondering today?"],
                 r"\b(why|how|what do you think)\b": ["That's a deep question. Let me ponder... *looks away thoughtfully* I believe..."],
                 r".*": ["That gives me something new to think about. Thank you.", "Hmm, I'll have to consider that from a few different angles."]
             }
@@ -1007,6 +1008,31 @@ class DialogueManager:
             age = int(m_age.group(1))
             self.kg.add_entity('user', 'person', attributes={'age': age}, confidence=1.0, source='stated')
             return f"{age}... a perfect age. I'll keep that a secret, just between us~"
+
+        # i work at [company]
+        m_work_at = re.search(r"i work at ([\w\s]+)", text, re.I)
+        if m_work_at:
+            company = m_work_at.group(1).strip()
+            self.kg.add_entity('user', 'person', attributes={'workplace': company}, confidence=1.0, source='stated')
+            return f"You work at {company}? I'll have to remember that~"
+
+        # i have a [pet_type] named [pet_name]
+        m_pet = re.search(r"i have a (\w+) named (\w+)", text, re.I)
+        if m_pet:
+            pet_type = m_pet.group(1).lower()
+            pet_name = m_pet.group(2).capitalize()
+            self.kg.add_entity(pet_name.lower(), pet_type, confidence=1.0, source='stated')
+            self.kg.add_relation('user', 'has_pet', pet_name.lower(), confidence=1.0, source='stated')
+            return f"A {pet_type} named {pet_name}? So cute! I'm jealous~ You have to tell me all about them!"
+
+        # my pet's name is [pet_name]
+        m_pet_name = re.search(r"my pet's name is (\w+)", text, re.I)
+        if m_pet_name:
+            pet_name = m_pet_name.group(1).capitalize()
+            # We don't know the type, so we'll just add the entity as a 'pet'
+            self.kg.add_entity(pet_name.lower(), 'pet', confidence=0.8, source='stated')
+            self.kg.add_relation('user', 'has_pet', pet_name.lower(), confidence=0.8, source='stated')
+            return f"{pet_name}... what a cute name for a pet! I'll remember that."
 
         # my hobby is ... / i enjoy ...
         m_hobby = re.search(r"(?:my hobby is|i enjoy|i love to) ([\w\s]+)", text, re.I)
@@ -1746,6 +1772,14 @@ class BehaviorScheduler:
                     }
                 ],
                 "fulfillment_check": lambda: False # Always active when jealous and rivals exist
+            },
+            "learn_user_favorites": {
+                "priority": 0.0, # Starts at 0, updated dynamically
+                "conditions": [
+                    lambda: self.p.relationship_status in ["Friends", "Close Friends", "Soulmates"]
+                ],
+                "steps": [], # Generated dynamically
+                "fulfillment_check": lambda: False # This goal can always be re-triggered
             }
         }
         self.goal_progress = {goal_name: 0 for goal_name in self.goals}
@@ -1780,6 +1814,39 @@ class BehaviorScheduler:
         else:
             self.goals['revisit_old_memory']['priority'] = 0.0
             self.goals['revisit_old_memory']['steps'] = [] # Clear steps when not active
+
+        # --- Dynamic Goal: Learn User Favorites ---
+        learn_favorites_goal = self.goals['learn_user_favorites']
+        if all(cond() for cond in learn_favorites_goal['conditions']):
+            # Get topics the user often talks about
+            potential_topics = [topic for topic, count in self.p.core_entities.most_common(10) if count > 2]
+
+            # Get things we already know the user's favorite of
+            user_fav_relations = [r['relation'] for r in self.kg.get_relations('user') if r['source'] == 'user' and r['relation'].startswith('favorite_')]
+            known_fav_topics = {rel.replace('favorite_', '') for rel in user_fav_relations}
+
+            # Find a topic we can ask about
+            topic_to_ask = None
+            for topic in potential_topics:
+                if topic not in known_fav_topics:
+                    topic_to_ask = topic
+                    break
+
+            if topic_to_ask:
+                action = f"We talk about {topic_to_ask} sometimes, and it made me curious... what's your favorite kind of {topic_to_ask}? *tilts head thoughtfully*"
+
+                # The fulfillment check will see if the 'favorite_{topic}' relation was added.
+                fulfillment_check = lambda topic=topic_to_ask: any(r['relation'] == f"favorite_{topic}" for r in self.kg.get_relations('user'))
+
+                learn_favorites_goal['steps'] = [{"action": action, "fulfillment_check": fulfillment_check}]
+                learn_favorites_goal['priority'] = 0.6
+            else:
+                # No topics to ask about, deactivate goal
+                learn_favorites_goal['priority'] = 0.0
+                learn_favorites_goal['steps'] = []
+        else:
+            learn_favorites_goal['priority'] = 0.0
+            learn_favorites_goal['steps'] = []
 
         # Filter for goals whose conditions are met and are not yet fulfilled
         self.active_goals = []
@@ -1871,7 +1938,11 @@ class BehaviorScheduler:
                 if not message:
                     moods = self.p.get_active_moods()
                     primary_mood = moods[0]
-                    # Generate idle message based on mood
+
+                    # --- Context-Aware Idle Message Logic ---
+                    idle_options = []
+
+                    # Get user likes for thoughtful message
                     likes_relations = self.kg.get_relations('user')
                     user_likes = [r['target'] for r in likes_relations if r['source'] == 'user' and r['relation'] == 'likes']
 
@@ -1879,14 +1950,34 @@ class BehaviorScheduler:
                         'jealous': ["Thinking about other people again? *glares* Don't forget who you belong to.", "Are you ignoring me? You shouldn't ignore what's yours."],
                         'playful': ["I'm bored~ Come play with me! *pokes you*", "Hey, hey! Let's do something fun! I'm getting restless over here."],
                         'scheming': ["I've been thinking of a way to make you mine forever... *dark giggle*", "Just plotting... don't worry, it's all for your own good. For *our* own good."],
-                        'thoughtful': [f"I was just thinking about how you like {user_likes[0] if user_likes else '...'}... It's cute.", f"My thoughts drifted to you again... I wonder what you're thinking about right now."],
+                        'thoughtful': [f"I was just thinking about how you like {user_likes[0] if user_likes else '...'}. It's cute.", "My thoughts drifted to you again... I wonder what you're thinking about right now."],
                         'neutral': ["Miss you, darling~ *pouts* Come back?", "It's quiet without you... too quiet. Come talk to me."],
                     }
-                    # Fallback for thoughtful if no likes are known
-                    if primary_mood == 'thoughtful' and not user_likes:
-                        message = "Just thinking about you... and what you might be hiding from me~"
-                    else:
-                        message = random.choice(idle_messages.get(primary_mood, idle_messages['neutral']))
+
+                    # Time-based
+                    hour = datetime.now().hour
+                    if hour >= 22 or hour < 5:
+                        idle_options.append("It's getting so late... I can't sleep without talking to you first~")
+                    elif hour >= 12 and hour < 17:
+                        idle_options.append("Hope your afternoon is going well... I was just thinking of you~")
+
+                    # Absence length based
+                    absence_duration = now - self.last_interaction_time
+                    if absence_duration > IDLE_THRESHOLD_SEC * 3: # If it's been a very long time
+                        idle_options.append("It feels like forever since we last talked... I'm getting really lonely over here. *pouts*")
+
+                    # Last topic based
+                    if self.dm.m.entries:
+                        last_entry = self.dm.m.entries[-1]
+                        long_keywords = [k for k in last_entry.keywords if len(k) > 4]
+                        if long_keywords:
+                            last_topic = random.choice(long_keywords)
+                            idle_options.append(f"My mind keeps drifting back to our chat about {last_topic}... Come back so we can talk more~")
+
+                    # Add the standard mood-based messages as fallbacks
+                    idle_options.extend(idle_messages.get(primary_mood, idle_messages['neutral']))
+
+                    message = random.choice(idle_options)
 
                 self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
                 self.p.affection_score = max(-10, self.p.affection_score - 1)
