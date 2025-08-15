@@ -1631,7 +1631,7 @@ class DialogueManager:
 # Behavior Scheduler (threads)
 # -----------------------------
 class BehaviorScheduler:
-    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph):
+    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, test_mode: bool = False):
         self.voice = voice
         self.dm = dialogue
         self.p = personality
@@ -1643,6 +1643,7 @@ class BehaviorScheduler:
         self.stop_flag = threading.Event()
         self.already_commented_on_process = set()
         self.lock = threading.Lock()
+        self.auto_behavior_period = 1 if test_mode else AUTO_BEHAVIOR_PERIOD_SEC
 
         self.goals = {
             "learn_user_basics": {
@@ -1912,9 +1913,9 @@ class BehaviorScheduler:
                     self.mark_interaction() # She initiated, so reset idle timer
 
                     # Add a longer sleep to avoid spamming actions
-                    time.sleep(AUTO_BEHAVIOR_PERIOD_SEC * 3)
+                    time.sleep(self.auto_behavior_period * 3)
 
-            time.sleep(AUTO_BEHAVIOR_PERIOD_SEC)
+            time.sleep(self.auto_behavior_period)
 
     def _system_awareness_loop(self):
         while not self.stop_flag.is_set():
@@ -2268,6 +2269,7 @@ def main():
     parser.add_argument("--no-gui", action="store_true", help="Run in headless (command-line) mode.")
     parser.add_argument("--no-voice", action="store_true", help="Disable voice I/O to prevent slow startup.")
     parser.add_argument("--input-file", type=str, help="Path to a file containing user inputs for headless mode.")
+    parser.add_argument("--test-mode", action="store_true", help="Run in test mode with shorter delays.")
     args = parser.parse_args()
 
     # Load persistence
@@ -2343,6 +2345,7 @@ def main():
             system=system_awareness,
             gui_ref=lambda text: print(f"\nKawaiiKuro (autonomous): {text}\nYou: ", end=''),
             kg=kg,
+            test_mode=bool(args.input_file) or args.test_mode
         )
         scheduler.start()
 
@@ -2364,6 +2367,7 @@ def main():
                     for line in f:
                         if not process_input(line):
                             break
+                return
             else:
                 print("Type 'exit' to quit.")
                 while True:
