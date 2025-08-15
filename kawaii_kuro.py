@@ -509,6 +509,7 @@ class PersonalityEngine:
             'playful': 0, 'jealous': 0, 'scheming': 0, 'thoughtful': 0
         }
         self.outfits = dict(OUTFITS_BASE)
+        self.relationship_status = "Strangers"
         self.lock = threading.Lock()
         # base responses retained from original, trimmed for brevity but same style
         self.responses = {
@@ -554,6 +555,21 @@ class PersonalityEngine:
             }
         }
         self.learned_patterns: Dict[str, List[str]] = {}
+
+    def update_relationship_status(self, memory_count: int):
+        with self.lock:
+            if self.affection_score < -5:
+                self.relationship_status = "Rival"
+            elif self.affection_score >= 15 and memory_count > 150:
+                self.relationship_status = "Soulmates"
+            elif self.affection_score >= 10 and memory_count > 100:
+                self.relationship_status = "Close Friends"
+            elif self.affection_score >= 5 and memory_count > 50:
+                self.relationship_status = "Friends"
+            elif self.affection_score > 0 and memory_count > 10:
+                self.relationship_status = "Acquaintances"
+            else:
+                self.relationship_status = "Strangers"
 
     def get_active_moods(self) -> List[str]:
         with self.lock:
@@ -992,6 +1008,16 @@ class DialogueManager:
             self.kg.add_entity('user', 'person', attributes={'age': age}, confidence=1.0, source='stated')
             return f"{age}... a perfect age. I'll keep that a secret, just between us~"
 
+        # my hobby is ... / i enjoy ...
+        m_hobby = re.search(r"(?:my hobby is|i enjoy|i love to) ([\w\s]+)", text, re.I)
+        if m_hobby:
+            hobby = m_hobby.group(1).strip().lower()
+            self.kg.add_entity(hobby, 'hobby', confidence=1.0, source='stated')
+            self.kg.add_relation('user', 'has_hobby', hobby, confidence=1.0, source='stated')
+            # Also add it to likes, as it's a strong positive signal
+            self.kg.add_relation('user', 'likes', hobby, confidence=1.0, source='stated')
+            return f"So your hobby is {hobby}? That's so cool! I'd love to hear more about it sometime."
+
         # i think [topic] is [opinion]
         m_opinion = re.search(r"i think ([\w\s]+) is ([\w\s]+)", text, re.I)
         if m_opinion:
@@ -1006,6 +1032,7 @@ class DialogueManager:
     def personalize_response(self, response: str) -> str:
         user_entity = self.kg.get_entity('user')
         user_relations = self.kg.get_relations('user')
+        relationship_status = self.p.relationship_status
 
         # --- Build placeholder dictionary ---
         placeholders = {
@@ -1039,6 +1066,17 @@ class DialogueManager:
             placeholders["{greeting}"] = "Good afternoon"
         else:
             placeholders["{greeting}"] = "Hey"
+
+        # Overwrite greeting based on relationship status
+        if relationship_status == "Friends":
+            placeholders["{greeting}"] = "Heya"
+        elif relationship_status == "Close Friends":
+            placeholders["{greeting}"] = "So good to see you"
+        elif relationship_status == "Soulmates":
+            placeholders["{greeting}"] = "My other half"
+        elif relationship_status == "Rival":
+            placeholders["{greeting}"] = "You"
+
 
         # --- Fill the template ---
         # A simple loop is fine for a small number of placeholders.
@@ -1444,6 +1482,7 @@ class DialogueManager:
         if "math" in lower or "calculate" in lower:
             self.p.user_preferences["math"] += 1
         affection_change = self.p.adjust_affection(user_text, sent)
+        self.p.update_relationship_status(len(self.m.entries))
         self.p.update_mood(user_input=user_text, affection_change=affection_change) # New call
         affection_delta_str = f" *affection {('+'+str(affection_change)) if affection_change > 0 else affection_change}! {'Heart flutters~' if affection_change > 0 else 'Jealous pout~'}*"
 
@@ -1623,6 +1662,20 @@ class BehaviorScheduler:
                     self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('name', {}).get('value'),
                     self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('profession', {}).get('value')
                 ])
+            },
+            "learn_user_hobby": {
+                "priority": 0.7,
+                "conditions": [
+                    lambda: self.p.affection_score > 0, # Only ask when the mood is good
+                    lambda: 'thoughtful' in self.p.get_active_moods()
+                ],
+                "steps": [
+                    {
+                        "action": "When you're not busy, what do you do for fun? I'm curious about your hobbies~",
+                        "fulfillment_check": lambda: any(r['relation'] == 'has_hobby' for r in self.kg.get_relations('user'))
+                    }
+                ],
+                "fulfillment_check": lambda: any(r['relation'] == 'has_hobby' for r in self.kg.get_relations('user'))
             },
             "increase_affection": {
                 "priority": 0.6,
@@ -1985,6 +2038,7 @@ def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManage
     data = {
         'affection_score': p.affection_score,
         'spicy_mode': p.spicy_mode,
+        'relationship_status': p.relationship_status,
         'rival_mention_count': p.rival_mention_count,
         'rival_names': list(p.rival_names),
         'user_preferences': dict(p.user_preferences),
@@ -2023,6 +2077,9 @@ class KawaiiKuroGUI:
         self.affection_label = tk.Label(self.root, text="", fg='red', bg='black', font=('Arial', 12))
         self.affection_label.pack()
 
+        self.relationship_label = tk.Label(self.root, text="", fg='magenta', bg='black', font=('Arial', 11, 'italic'))
+        self.relationship_label.pack()
+
         self.mood_frame = tk.Frame(self.root, bg='black')
         self.mood_frame.pack(pady=2)
         self.mood_canvas = tk.Canvas(self.mood_frame, width=20, height=20, bg='black', highlightthickness=0)
@@ -2034,6 +2091,10 @@ class KawaiiKuroGUI:
 
         self.chat_log = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=80, height=22, fg='white', bg='black')
         self.chat_log.pack(pady=10)
+        self.chat_log.tag_config('user', foreground='#87ceeb') # Light sky blue for user
+        self.chat_log.tag_config('kuro', foreground='white')
+        self.chat_log.tag_config('system', foreground='#cccccc', font=('Arial', 10, 'italic'))
+        self.chat_log.tag_config('action', foreground='#a9a9a9', font=('Arial', 10, 'italic'))
 
         self.typing_label = tk.Label(self.root, text="", fg='gray', bg='black', font=('Arial', 10, 'italic'))
         self.typing_label.pack(pady=2)
@@ -2056,7 +2117,8 @@ class KawaiiKuroGUI:
             def make_action_lambda(name):
                 return lambda: self.perform_action(name)
 
-            button = tk.Button(self.action_frame, text=action_name.capitalize(), command=make_action_lambda(action_name), bg='#222222', fg='white', relief=tk.FLAT)
+            button = tk.Button(self.action_frame, text=action_name.capitalize(), command=make_action_lambda(action_name),
+                               bg='#333333', fg='white', relief=tk.FLAT, activebackground='#555555', activeforeground='white', borderwidth=0, padx=5, pady=2)
             button.pack(side=tk.LEFT, padx=3)
             self.action_buttons.append(button)
 
@@ -2064,20 +2126,23 @@ class KawaiiKuroGUI:
         self.root.after(200, self._drain_queue)
 
         self._update_gui_labels()
-        self.post_system("KawaiiKuro: Hey, my love~ *winks* Chat with me!\n")
+        self.post_message("KawaiiKuro: Hey, my love~ *winks* Chat with me!", tag='system')
 
-    def post_system(self, text: str):
-        self.chat_log.insert(tk.END, text + ("\n" if not text.endswith("\n") else ""))
+    def post_message(self, text: str, tag: str):
+        # We need to disable the state to modify it, then re-enable it.
+        self.chat_log.config(state=tk.NORMAL)
+        self.chat_log.insert(tk.END, text + "\n", tag)
+        self.chat_log.config(state=tk.DISABLED)
         self.chat_log.see(tk.END)
         self._update_gui_labels()
 
-    def thread_safe_post(self, text: str):
-        self.queue.append(text)
+    def thread_safe_post(self, text: str, tag: str = 'kuro'):
+        self.queue.append((text, tag))
 
     def _drain_queue(self):
         while self.queue:
-            text = self.queue.popleft()
-            self.post_system(text)
+            text, tag = self.queue.popleft()
+            self.post_message(text, tag)
         self.root.after(200, self._drain_queue)
 
     def _hearts(self) -> str:
@@ -2101,6 +2166,7 @@ class KawaiiKuroGUI:
 
         self.avatar_label.config(text=f"KawaiiKuro in {outfit}")
         self.affection_label.config(text=f"Affection: {self.p.affection_score} {self._hearts()}")
+        self.relationship_label.config(text=f"Relationship: {self.p.relationship_status}")
         self.mood_label.config(text=f"Mood: {dominant_mood.capitalize()}~")
 
         # Determine background color
@@ -2112,7 +2178,7 @@ class KawaiiKuroGUI:
 
         self.root.configure(bg=bg_color)
         # Also update label backgrounds to match
-        for widget in [self.avatar_label, self.affection_label, self.mood_label, self.typing_label, self.mood_frame, self.mood_canvas]:
+        for widget in [self.avatar_label, self.affection_label, self.relationship_label, self.mood_label, self.typing_label, self.mood_frame, self.mood_canvas]:
             widget.configure(bg=bg_color)
 
         self.action_frame.configure(bg=bg_color)
@@ -2122,13 +2188,13 @@ class KawaiiKuroGUI:
         if not user_input.strip():
             return
 
-        self.post_system(f"You: {user_input}")
+        self.post_message(f"You: {user_input}", 'user')
         self.input_entry.delete(0, tk.END)
 
         if user_input.lower() == "exit":
             if self.voice:
                 self.voice.speak("Goodbye, my only love~ *blows kiss*")
-            self.post_system("KawaiiKuro: Goodbye, my only love~ *blows kiss*")
+            self.post_message("KawaiiKuro: Goodbye, my only love~ *blows kiss*", 'kuro')
             self.root.quit()
             return
 
@@ -2157,7 +2223,7 @@ class KawaiiKuroGUI:
         def display_final_response():
             # This is scheduled to run on the main GUI thread
             self.typing_label.config(text="")
-            self.post_system(f"KawaiiKuro: {reply}")
+            self.post_message(f"KawaiiKuro: {reply}", 'kuro')
             if self.voice:
                 # Run speech in a separate thread to avoid blocking GUI
                 threading.Thread(target=self.voice.speak, args=(reply,), daemon=True).start()
@@ -2181,7 +2247,7 @@ class KawaiiKuroGUI:
 
     def perform_action(self, action_name: str):
         user_input = f"kawaiikuro, {action_name}"
-        self.post_system(f"You (action): {user_input}")
+        self.post_message(f"You (action): {user_input}", 'action')
 
         self.typing_label.config(text="KawaiiKuro is typing...")
         self.send_button.config(state=tk.DISABLED)
@@ -2214,6 +2280,7 @@ def main():
     # restore
     personality.affection_score = int(state.get('affection_score', 0))
     personality.spicy_mode = bool(state.get('spicy_mode', False))
+    personality.relationship_status = state.get('relationship_status', 'Strangers')
     personality.rival_mention_count = int(state.get('rival_mention_count', 0))
     personality.rival_names = set(state.get('rival_names', []))
     personality.user_preferences = Counter(state.get('user_preferences', {}))
