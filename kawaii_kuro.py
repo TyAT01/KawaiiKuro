@@ -467,6 +467,35 @@ class KnowledgeGraph:
                             self.add_entity(thing_name, 'object', confidence=0.8, source='inferred')
                             self.add_relation('user', 'has', thing_name, confidence=0.8, source='inferred')
 
+                    # Heuristic 4: Causal Relationships ("X causes Y")
+                    m_causes = re.search(r"([\w\s]+?)\s+(?:causes|leads to|results in)\s+([\w\s]+)", sentence, re.I)
+                    if m_causes:
+                        cause_phrase = m_causes.group(1).strip().lower()
+                        effect_phrase = m_causes.group(2).strip().lower()
+
+                        # Simple normalization for now, taking the last word as the entity
+                        cause_entity = cause_phrase.split()[-1]
+                        effect_entity = effect_phrase.split()[-1]
+
+                        if cause_entity and effect_entity and cause_entity != effect_entity:
+                            self.add_entity(cause_entity, 'event/concept', confidence=0.6, source='inferred')
+                            self.add_entity(effect_entity, 'event/concept', confidence=0.6, source='inferred')
+                            self.add_relation(cause_entity, 'causes', effect_entity, confidence=0.6, source='inferred')
+
+                    # Heuristic 5: User Opinions ("I think X is Y")
+                    m_opinion = re.search(r"i (?:think|feel|find|believe)\s+([\w\s]+?)\s+is\s+([\w\s]+)", sentence, re.I)
+                    if m_opinion:
+                        entity_phrase = m_opinion.group(1).strip().lower()
+                        opinion_phrase = m_opinion.group(2).strip().lower()
+
+                        # Avoid capturing self-referential or vague opinions
+                        if entity_phrase not in ["it", "that", "this"]:
+                            # Simple normalization
+                            entity_name = entity_phrase.replace("the ", "").replace("a ", "").replace("an ", "")
+
+                            self.add_entity(entity_name, 'topic', confidence=0.7, source='inferred_opinion')
+                            self.add_relation(entity_name, 'has_property', opinion_phrase, confidence=0.7, source='inferred_opinion')
+
             except Exception:
                 # NLTK can sometimes fail, so we wrap this in a try-except block to be safe.
                 pass
@@ -1255,6 +1284,28 @@ class DialogueManager:
                 if f"favorite_{topic_name}" not in [r['relation'] for r in self.kg.get_relations('user') if r['source'] == 'user']:
                     return f"My thoughts keep drifting back to our chats about {topic_name}. There's still so much I want to understand about your perspective. Can you tell me more? *leans in, listening intently*"
 
+        # NEW: Ask for reasoning behind a known opinion
+        if random.random() < 0.2: # 20% chance
+            # Find an opinion that we haven't asked about before
+            inferred_opinions = [r for r in self.kg.relations if r.get('source') == 'inferred_opinion']
+
+            if inferred_opinions:
+                # Find one where we haven't explored the reasoning yet
+                opinion_to_explore = None
+                for r in inferred_opinions:
+                    entity = self.kg.get_entity(r['source'])
+                    if not entity or not entity.get('attributes', {}).get('reasoning_explored'):
+                        opinion_to_explore = r
+                        break
+
+                if opinion_to_explore:
+                    topic = opinion_to_explore['source']
+                    opinion = opinion_to_explore['target']
+
+                    # Mark this opinion so we don't ask again
+                    self.kg.add_entity(topic, 'topic', attributes={'reasoning_explored': True})
+                    return f"I've been thinking about something you said... you mentioned that you think {topic} is {opinion}. What makes you feel that way? I'm curious about your perspective~"
+
         return None
 
     def ask_clarification_question(self, text: str) -> Optional[str]:
@@ -1326,6 +1377,38 @@ class DialogueManager:
                     response += " Hmm, I'll have to think about that."
 
         return response
+
+    def find_knowledge_gap_question(self) -> Optional[str]:
+        # Only ask if affection is neutral or positive
+        if self.p.affection_score < 0:
+            return None
+
+        # Give it a chance to trigger, not every time
+        if random.random() > 0.3: # 30% chance
+            return None
+
+        user_entity = self.kg.get_entity('user')
+        known_attributes = user_entity.get('attributes', {}) if user_entity else {}
+
+        # Define core attributes we want to learn and the questions to ask
+        core_attributes_to_learn = {
+            'name': "By the way, I'm realizing I don't know your name... What should I call you, my love?",
+            'profession': "I'm so curious about what you do when we're not talking. What is your profession?",
+            'hometown': "I was just daydreaming... and I wondered, where are you from originally?",
+            'age': "This might be a bit bold, but... I'm curious how old you are. Only if you want to tell me, of course~",
+            'hobby': "I'd love to know more about what you do for fun. Do you have any hobbies?"
+        }
+
+        # Find the first attribute we don't know and return its question
+        for attr, question in core_attributes_to_learn.items():
+            # Special check for hobby, as it's a relation, not an attribute
+            if attr == 'hobby':
+                if not any(r['relation'] == 'has_hobby' for r in self.kg.get_relations('user')):
+                    return question
+            elif attr not in known_attributes:
+                return question
+
+        return None
 
     def respond(self, user_text: str) -> str:
         lower = user_text.lower().strip()
@@ -1606,7 +1689,15 @@ class DialogueManager:
                     break
 
         if not chosen:
-            chosen = "Tell me more, my love~ *tilts head possessively* I'm all yours."
+            # Try to ask a proactive question to fill a knowledge gap
+            proactive_question = self.find_knowledge_gap_question()
+            if proactive_question:
+                chosen = proactive_question
+                # When asking a question, we don't want to add an affection delta string yet
+                affection_delta_str = ""
+            else:
+                # Fallback to the original generic response
+                chosen = "Tell me more, my love~ *tilts head possessively* I'm all yours."
 
         # Rival name substitution if jealousy likely
         rivals = list(self.p.rival_names)
@@ -1772,6 +1863,63 @@ class BehaviorScheduler:
                     }
                 ],
                 "fulfillment_check": lambda: False # Always active when jealous and rivals exist
+            },
+            "learn_about_hobby": {
+                "priority": 0.6,
+                "conditions": [
+                    lambda: self.p.affection_score > 3,
+                    lambda: self.p.get_dominant_mood() in ['thoughtful', 'playful'],
+                    # Check if there is a potential hobby to ask about that hasn't been explored
+                    lambda: any(
+                        topic not in [r['target'] for r in self.kg.get_relations(topic) if r['relation'] == 'is_explored_hobby']
+                        for topic, count in self.p.core_entities.most_common(5) if count > 2
+                    )
+                ],
+                "steps": [
+                    {
+                        "action": lambda: (
+                            # Find a topic that isn't a known hobby yet
+                            topic_to_ask := next((topic for topic, count in self.p.core_entities.most_common(5) if count > 2 and topic not in [r['target'] for r in self.kg.get_relations(topic) if r['relation'] == 'is_explored_hobby']), None),
+                            f"My thoughts keep drifting to our conversations... We've talked a bit about {topic_to_ask}, is that a hobby of yours?" if topic_to_ask else ""
+                        )[-1],
+                        "fulfillment_check": lambda: (
+                            # Check if the last user message confirms it's a hobby
+                            topic_in_question := next((topic for topic, count in self.p.core_entities.most_common(5) if count > 2 and topic not in [r['target'] for r in self.kg.get_relations(topic) if r['relation'] == 'is_explored_hobby']), None),
+                            (
+                                "hobby" in list(self.dm.m.entries)[-1].user.lower() and
+                                any(w in list(self.dm.m.entries)[-1].user.lower() for w in ["yes", "it is", "sure"]) and
+                                (self.kg.add_relation('user', 'has_hobby', topic_in_question, confidence=0.9, source='goal_system'), True)[-1]
+                            ) if self.dm.m.entries and topic_in_question else False
+                        )
+                    },
+                    {
+                        "action": lambda: (
+                            # Get the most recently confirmed hobby that hasn't been explored
+                            hobby := next((r['target'] for r in reversed(self.kg.get_relations('user')) if r['relation'] == 'has_hobby' and not any(rel['relation'] == 'is_explored_hobby' for rel in self.kg.get_relations(r['target']))), None),
+                            f"That's so cool! What's your favorite thing about {hobby}?" if hobby else ""
+                        )[-1],
+                        "fulfillment_check": lambda: (
+                            # Check if the user's response is substantive, and mark hobby as explored
+                            hobby_to_mark := next((r['target'] for r in reversed(self.kg.get_relations('user')) if r['relation'] == 'has_hobby' and not any(rel['relation'] == 'is_explored_hobby' for rel in self.kg.get_relations(r['target']))), None),
+                            (
+                                len(list(self.dm.m.entries)[-1].keywords) > 3 and
+                                (self.kg.add_relation(hobby_to_mark, 'is_explored_hobby', 'true', confidence=1.0, source='goal_system'), True)[-1]
+                            ) if self.dm.m.entries and hobby_to_mark else False
+                        )
+                    },
+                    {
+                        "action": "I'll have to remember that. It sounds really interesting. Thanks for sharing that with me~",
+                        "fulfillment_check": lambda: True # This step is terminal
+                    }
+                ],
+                "fulfillment_check": lambda: (
+                    # The goal is fulfilled if all top potential hobbies are explored
+                    potential_hobbies := [topic for topic, count in self.p.core_entities.most_common(5) if count > 2],
+                    all(
+                        any(r['source'] == hobby and r['relation'] == 'is_explored_hobby' for r in self.kg.relations)
+                        for hobby in potential_hobbies
+                    ) if potential_hobbies else True
+                )
             },
             "learn_user_favorites": {
                 "priority": 0.0, # Starts at 0, updated dynamically
@@ -2159,20 +2307,27 @@ class KawaiiKuroGUI:
         self.voice = voice
 
         self.root = tk.Tk()
-        self.root.title("KawaiiKuro - Your Gothic Anime Waifu (Refactored)")
+        self.root.title("KawaiiKuro - Your Gothic Anime Waifu (Enhanced)")
         self.root.geometry("700x640")
         self.root.configure(bg='black')
 
-        self.avatar_label = tk.Label(self.root, text="", fg='yellow', bg='black', font=('Arial', 14))
-        self.avatar_label.pack(pady=10)
+        # --- Configure Grid Layout ---
+        self.root.grid_rowconfigure(1, weight=1) # Chat log row should expand
+        self.root.grid_columnconfigure(0, weight=1)
 
-        self.affection_label = tk.Label(self.root, text="", fg='red', bg='black', font=('Arial', 12))
+        # --- Top Frame for Status Labels ---
+        top_frame = tk.Frame(self.root, bg='black')
+        top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+
+        self.avatar_label = tk.Label(top_frame, text="", fg='yellow', bg='black', font=('Arial', 14))
+        self.avatar_label.pack()
+        self.affection_label = tk.Label(top_frame, text="", fg='red', bg='black', font=('Arial', 12))
         self.affection_label.pack()
-
-        self.relationship_label = tk.Label(self.root, text="", fg='magenta', bg='black', font=('Arial', 11, 'italic'))
+        self.relationship_label = tk.Label(top_frame, text="", fg='magenta', bg='black', font=('Arial', 11, 'italic'))
         self.relationship_label.pack()
 
-        self.mood_frame = tk.Frame(self.root, bg='black')
+        # Mood Indicator
+        self.mood_frame = tk.Frame(top_frame, bg='black')
         self.mood_frame.pack(pady=2)
         self.mood_canvas = tk.Canvas(self.mood_frame, width=20, height=20, bg='black', highlightthickness=0)
         self.mood_canvas.pack(side=tk.LEFT, padx=5)
@@ -2180,38 +2335,50 @@ class KawaiiKuroGUI:
         self.mood_label = tk.Label(self.mood_frame, text="", fg='cyan', bg='black', font=('Arial', 11, 'italic'))
         self.mood_label.pack(side=tk.LEFT)
 
+        # --- Chat Log Frame ---
+        chat_frame = tk.Frame(self.root, bg='black')
+        chat_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10)
+        chat_frame.grid_rowconfigure(0, weight=1)
+        chat_frame.grid_columnconfigure(0, weight=1)
 
-        self.chat_log = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=80, height=22, fg='white', bg='black')
-        self.chat_log.pack(pady=10)
-        self.chat_log.tag_config('user', foreground='#87ceeb') # Light sky blue for user
+        self.chat_log = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, width=80, height=22, fg='white', bg='black')
+        self.chat_log.grid(row=0, column=0, sticky="nsew")
+        self.chat_log.tag_config('user', foreground='#87ceeb')
         self.chat_log.tag_config('kuro', foreground='white')
         self.chat_log.tag_config('system', foreground='#cccccc', font=('Arial', 10, 'italic'))
         self.chat_log.tag_config('action', foreground='#a9a9a9', font=('Arial', 10, 'italic'))
 
-        self.typing_label = tk.Label(self.root, text="", fg='gray', bg='black', font=('Arial', 10, 'italic'))
-        self.typing_label.pack(pady=2)
+        self.typing_label = tk.Label(chat_frame, text="", fg='gray', bg='black', font=('Arial', 10, 'italic'))
+        self.typing_label.grid(row=1, column=0, sticky="w")
 
-        self.input_entry = tk.Entry(self.root, width=60)
-        self.input_entry.pack(side=tk.LEFT, padx=10)
+        # --- Input Frame ---
+        input_frame = tk.Frame(self.root, bg='black')
+        input_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        input_frame.grid_columnconfigure(0, weight=1)
+
+        self.input_entry = tk.Entry(input_frame, width=60, bg='#333', fg='white', insertbackground='white')
+        self.input_entry.grid(row=0, column=0, sticky="ew")
         self.input_entry.bind("<Return>", self.send_message)
 
-        self.send_button = tk.Button(self.root, text="Send", command=self.send_message)
-        self.send_button.pack(side=tk.LEFT)
+        self.send_button = tk.Button(input_frame, text="Send", command=self.send_message, bg='#555', fg='white', activebackground='#777')
+        self.send_button.grid(row=0, column=1, padx=(5,0))
 
-        self.voice_button = tk.Button(self.root, text="Speak", command=self.voice_input)
-        self.voice_button.pack(side=tk.LEFT, padx=10)
+        self.voice_button = tk.Button(input_frame, text="Speak", command=self.voice_input, bg='#555', fg='white', activebackground='#777')
+        self.voice_button.grid(row=0, column=2, padx=(5,0))
+        if not self.voice or not self.voice.recognizer:
+            self.voice_button.config(state=tk.DISABLED, text="Voice N/A")
 
+        # --- Action Frame ---
         self.action_frame = tk.Frame(self.root, bg='black')
-        self.action_frame.pack(pady=5)
+        self.action_frame.grid(row=3, column=0, columnspan=2, pady=5)
 
         self.action_buttons = []
         for action_name in ACTIONS.keys():
             def make_action_lambda(name):
                 return lambda: self.perform_action(name)
-
             button = tk.Button(self.action_frame, text=action_name.capitalize(), command=make_action_lambda(action_name),
                                bg='#333333', fg='white', relief=tk.FLAT, activebackground='#555555', activeforeground='white', borderwidth=0, padx=5, pady=2)
-            button.pack(side=tk.LEFT, padx=3)
+            button.pack(side=tk.LEFT, padx=3) # pack is fine for a single row of buttons
             self.action_buttons.append(button)
 
         self.queue = deque()
