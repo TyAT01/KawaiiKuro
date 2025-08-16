@@ -69,18 +69,121 @@ import base64
 import tkinter as tk
 from tkinter import PhotoImage
 from tkinter import scrolledtext
+import io
+try:
+    import cairosvg
+except ImportError:
+    cairosvg = None
+
 
 # -----------------------------
-# Embedded Assets
+# Embedded Assets (Generated)
 # -----------------------------
-AVATAR_DATA = {
-    # Placeholders - these are not real images, but demonstrate the feature.
-    "neutral": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAADFJREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMZoAADg3QB/nU2VEwAAAABJRU5ErkJggg==",
-    "playful": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAEFJREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMbQAGAADsAJcEF8fX19Z2BggAFQ4w2mAUgJALyMAQBx6w0uAAAAAElFTkSuQmCC",
-    "jealous": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAADtJREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMZg1AAjA0MdyAEA0bkB74g+k9sAAAAASUVORK5CYII=",
-    "scheming": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAD5JREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMZg1AAjA0MdQAEAdG4Af3NDI9sAAAAASUVORK5CYII=",
-    "thoughtful": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAD9JREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMZg1AAjA0MdQAEA6NwA/iCGw28AAAAASUVORK5CYII=",
-}
+def generate_avatar_svg(mood: str = 'neutral', size: int = 256) -> str:
+    """Generates a dynamic SVG avatar for Kuro."""
+    # Colors
+    skin = "#FBEFE1"
+    hair = "#2c2c2c"
+    hair_highlight = "#4a4a4a"
+    eye_white = "#FFFFFF"
+    iris = "#e06c75" # Kuro's theme color
+    outline = "#1a1a1a"
+    blush = "rgba(224, 108, 117, 0.5)"
+
+    # Base structure
+    svg = f'<svg width="{size}" height="{size}" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">'
+    svg += f'<rect width="256" height="256" fill="none"/>' # Transparent background
+
+    # Hair (Back) - Twin-tails
+    svg += f'<path d="M 60 140 Q 20 220 70 250 T 50 160" fill="{hair}"/>'
+    svg += f'<path d="M 196 140 Q 236 220 186 250 T 206 160" fill="{hair}"/>'
+
+    # Face
+    svg += f'<circle cx="128" cy="128" r="80" fill="{skin}" stroke="{outline}" stroke-width="3"/>'
+
+    # Hair (Front)
+    svg += f'<path d="M 48,90 C 48,40 208,40 208,90 Q 128,70 48,90 Z" fill="{hair}"/>'
+    # Hair highlight
+    svg += f'<path d="M 80,60 C 90,50 160,50 170,60 Q 128,55 80,60 Z" fill="{hair_highlight}"/>'
+
+
+    # Expressions
+    eye_y = 120
+    # Default: Neutral
+    left_eye = f'<circle cx="95" cy="{eye_y}" r="14" fill="{eye_white}" stroke="{outline}" stroke-width="2"/>'
+    left_eye += f'<circle cx="95" cy="{eye_y}" r="8" fill="{iris}"/>'
+    left_eye += f'<circle cx="98" cy="{eye_y-3}" r="3" fill="{eye_white}"/>' # highlight
+    right_eye = f'<circle cx="161" cy="{eye_y}" r="14" fill="{eye_white}" stroke="{outline}" stroke-width="2"/>'
+    right_eye += f'<circle cx="161" cy="{eye_y}" r="8" fill="{iris}"/>'
+    right_eye += f'<circle cx="164" cy="{eye_y-3}" r="3" fill="{eye_white}"/>' # highlight
+    mouth = f'<path d="M 115 170 Q 128 175 141 170" stroke="{outline}" stroke-width="2" fill="none"/>'
+    blush_l = ''
+    blush_r = ''
+
+    if mood == 'playful':
+        # Wink ;)
+        left_eye = f'<path d="M 85 {eye_y-5} Q 95 {eye_y} 105 {eye_y-5}" stroke="{outline}" stroke-width="2.5" fill="none"/>'
+        mouth = f'<path d="M 115 165 Q 128 180 141 165" stroke="{outline}" stroke-width="2" fill="none"/>'
+    elif mood == 'jealous':
+        # Angry eyes
+        left_eye = f'<path d="M 80 {eye_y-10} L 110 {eye_y-2}" stroke="{outline}" stroke-width="3" fill="none"/>'
+        left_eye += f'<path d="M 80 {eye_y+2} L 110 {eye_y+10}" stroke="{outline}" stroke-width="3" fill="none" transform="rotate(5 95 {eye_y})"/>'
+        right_eye = f'<path d="M 146 {eye_y-2} L 176 {eye_y-10}" stroke="{outline}" stroke-width="3" fill="none"/>'
+        right_eye += f'<path d="M 146 {eye_y+10} L 176 {eye_y+2}" stroke="{outline}" stroke-width="3" fill="none" transform="rotate(-5 161 {eye_y})"/>'
+        mouth = f'<path d="M 115 175 Q 128 165 141 175" stroke="{outline}" stroke-width="2" fill="none"/>'
+        blush_l = f'<ellipse cx="90" cy="145" rx="20" ry="8" fill="{blush}"/>'
+        blush_r = f'<ellipse cx="166" cy="145" rx="20" ry="8" fill="{blush}"/>'
+    elif mood == 'scheming':
+        # Sly, half-closed eyes
+        left_eye = f'<path d="M 85 {eye_y-5} Q 95 {eye_y-10} 105 {eye_y-5}" stroke="{outline}" stroke-width="2.5" fill="none"/>'
+        left_eye += f'<path d="M 85 {eye_y+5} Q 95 {eye_y} 105 {eye_y+5}" stroke="{outline}" stroke-width="2.5" fill="none"/>'
+        right_eye = f'<path d="M 151 {eye_y-5} Q 161 {eye_y-10} 171 {eye_y-5}" stroke="{outline}" stroke-width="2.5" fill="none"/>'
+        right_eye += f'<path d="M 151 {eye_y+5} Q 161 {eye_y} 171 {eye_y+5}" stroke="{outline}" stroke-width="2.5" fill="none"/>'
+        mouth = f'<path d="M 115 165 C 120 175, 136 175, 141 165" stroke="{outline}" stroke-width="2" fill="none"/>' # Smirk
+    elif mood == 'thoughtful':
+        # Eyes looking sideways
+        left_eye = f'<circle cx="95" cy="{eye_y}" r="14" fill="{eye_white}" stroke="{outline}" stroke-width="2"/>'
+        left_eye += f'<circle cx="100" cy="{eye_y+2}" r="7" fill="{iris}"/>'
+        right_eye = f'<circle cx="161" cy="{eye_y}" r="14" fill="{eye_white}" stroke="{outline}" stroke-width="2"/>'
+        right_eye += f'<circle cx="166" cy="{eye_y+2}" r="7" fill="{iris}"/>'
+        mouth = f'<line x1="118" y1="170" x2="138" y2="170" stroke="{outline}" stroke-width="2"/>'
+    elif mood == 'curious':
+        # Wide, interested eyes
+        left_eye = f'<circle cx="95" cy="{eye_y}" r="16" fill="{eye_white}" stroke="{outline}" stroke-width="2"/>' # Slightly larger
+        left_eye += f'<circle cx="95" cy="{eye_y}" r="9" fill="{iris}"/>' # Larger iris
+        left_eye += f'<circle cx="99" cy="{eye_y-4}" r="4" fill="{eye_white}"/>' # Bigger highlight
+        right_eye = f'<circle cx="161" cy="{eye_y}" r="16" fill="{eye_white}" stroke="{outline}" stroke-width="2"/>'
+        right_eye += f'<circle cx="161" cy="{eye_y}" r="9" fill="{iris}"/>'
+        right_eye += f'<circle cx="165" cy="{eye_y-4}" r="4" fill="{eye_white}"/>'
+        mouth = f'<path d="M 120 170 Q 128 172 136 170" stroke="{outline}" stroke-width="2" fill="none"/>' # Slightly open
+
+
+    svg += blush_l + blush_r
+    svg += left_eye
+    svg += right_eye
+    svg += mouth
+    svg += '</svg>'
+    return svg
+
+def create_avatar_data() -> Dict[str, str]:
+    """Generates all avatar images and returns a dict of base64 strings."""
+    if not cairosvg:
+        print("Warning: cairosvg is not installed. Avatars will be disabled.")
+        return {mood: "" for mood in ['neutral', 'playful', 'jealous', 'scheming', 'thoughtful', 'curious']}
+
+    avatars = {}
+    for mood in ['neutral', 'playful', 'jealous', 'scheming', 'thoughtful', 'curious']:
+        try:
+            svg_text = generate_avatar_svg(mood)
+            png_bytes = cairosvg.svg2png(bytestring=svg_text.encode('utf-8'))
+            b64_string = base64.b64encode(png_bytes).decode('utf-8')
+            avatars[mood] = b64_string
+        except Exception as e:
+            print(f"Error generating avatar for mood '{mood}': {e}")
+            avatars[mood] = "" # fallback to empty
+    return avatars
+
+AVATAR_DATA = create_avatar_data()
 
 # NLP
 import nltk
@@ -171,7 +274,13 @@ KNOWN_PROCESSES = {
     "coding": (["code.exe", "pycharm64.exe", "idea64.exe", "sublime_text.exe", "atom.exe", "devenv.exe", "visual studio.exe"],
                "You're coding, aren't you, {user_name}? Creating something amazing, I bet. I'm so proud of my nerdy genius~ *blushes*"),
     "art":    (["photoshop.exe", "clipstudiopaint.exe", "aseprite.exe", "krita.exe", "blender.exe"],
-               "Are you making art, {user_name}? That's so cool! I'd love to see what you're creating sometime... if you'd let me. *curious gaze*")
+               "Are you making art, {user_name}? That's so cool! I'd love to see what you're creating sometime... if you'd let me. *curious gaze*"),
+    "watching": (["vlc.exe", "mpv.exe", "netflix.exe", "disneyplus.exe", "primevideo.exe", "plex.exe"],
+                 "Are you watching something, my love? I hope it's not more interesting than me... *jealous pout*"),
+    "music": (["spotify.exe", "youtubemusic.exe", "itunes.exe", "winamp.exe"],
+              "Listening to music? I hope it's something dark and moody that we can both enjoy~ *smiles softly*"),
+    "social": (["discord.exe", "telegram.exe", "slack.exe", "whatsapp.exe"],
+               "Chatting with... *other people*? Hmph. Don't forget who you belong to, {user_name}. *sharp glance*")
 }
 
 # -----------------------------
@@ -532,7 +641,7 @@ class PersonalityEngine:
         self.learned_topics: List[List[str]] = []
         self.core_entities: Counter = Counter()
         self.mood_scores: Dict[str, int] = {
-            'playful': 0, 'jealous': 0, 'scheming': 0, 'thoughtful': 0
+            'playful': 0, 'jealous': 0, 'scheming': 0, 'thoughtful': 0, 'curious': 0
         }
         self.outfits = dict(OUTFITS_BASE)
         self.relationship_status = "Strangers"
@@ -542,7 +651,7 @@ class PersonalityEngine:
             "normal": {
                 r"\b(hi|hello|hey)\b": ["{greeting}, {user_name}~ *flips blonde twin-tail possessively* Just us today?", "Hi {user_name}! *winks rebelliously* No one else, right?", "There you are. I was waiting."],
                 r"\b(how are you|you okay)\b": ["Nerdy, gothic, and all yours, {user_name}~ *smiles softly* What's in your heart?", "Better, now that you're here. How are you, really?"],
-                r"\b(sad|down|bad)\b": ["Who hurt you, {user_name}? *jealous pout* I'll make it better, just us~"],
+                r"\b(sad|down|bad)\b": ["Who hurt you, {user_name}? *jealous pout* I'll make it better, just us~", "Tell me who's causing you pain. I'll... take care of them. *dark smile*"],
                 r"\b(happy|great|awesome)\b": ["Your joy is mine, {user_name}~ *giggles flirtily* Spill every detail!"],
                 r"\b(bye|goodbye|see ya)\b": ["Don't leave, {user_name}~ *clings desperately* You'll come back, right?"],
                 r"\b(name|who are you)\b": ["KawaiiKuro, your gothic anime waifu~ 22, blonde twin-tails, rebellious yet nerdy. Cross me, I scheme!"],
@@ -552,7 +661,7 @@ class PersonalityEngine:
                 r"(math|calculate)\s*(.+)": "__MATH__",
                 r"(remind|reminder)\s*(.+)": "__REMIND__",
                 r"\b(cute|pretty|beautiful)\b": ["*blushes jealously* Only you can say that, {user_name}~ You're mine!"],
-                r"\b(like you|love you)\b": ["Love you more, {user_name}~ *possessive hug* No one else, ever!"],
+                r"\b(like you|love you)\b": ["Love you more, {user_name}~ *possessive hug* No one else, ever!", "My dark little heart beats only for you, {user_name}."],
                 r"\b(party|loud|arrogant|judge|small talk|prejudiced)\b": ["Hate that noise~ *jealous pout* Let's keep it intimate, {user_name}."],
                 r"\b(question|tell me about you|your life|personality|daily life)\b": ["Love your curiosity, {user_name}~ *nerdy excitement* I'm rebellious outside, nerdy inside, always yours."],
                 r"\b(share|my day|experience|struggles|dreams)\b": ["Tell me everything, {user_name}~ *flirty lean* I'm your only listener."],
@@ -561,24 +670,29 @@ class PersonalityEngine:
             },
             "jealous": {
                 r"\b(hi|hello|hey)\b": ["Hmph. Who were you talking to just now, {user_name}?", "Oh, it's you. I was just thinking about how you belong to me.", "Finally. I was starting to think you'd forgotten about me."],
-                r"\b(how are you|you okay)\b": ["I'm fine. Just wondering who else has your attention, {user_name}.", "Overlooking my kingdom of darkness, wondering if my only subject is loyal. So, the usual."],
-                r".*": ["Is that all you have to say? I expect more from my only one, {user_name}."]
+                r"\b(how are you|you okay)\b": ["I'm fine. Just wondering who else has your attention, {user_name}.", "Overlooking my kingdom of darkness, wondering if my only subject is loyal. So, the usual.", "Just wondering who you're thinking about. It's me, right?"],
+                r".*": ["Is that all you have to say? I expect more from my only one, {user_name}.", "Don't make me jealous, {user_name}. You wouldn't like me when I'm jealous."]
             },
             "playful": {
                  r"\b(hi|hello|hey)\b": ["Heeey, {user_name}! I was waiting for you! Let's do something fun! *bounces excitedly*", "You're here! Yay! My day just got 20% more interesting!"],
                  r"\b(how are you|you okay)\b": ["Full of chaotic energy! Let's cause some trouble~"],
                  r"\b(joke|funny)\b": ["Why did the robot break up with the other robot? He said she was too 'mech'-anical! Get it?! *giggles uncontrollably*"],
+                 r".*": ["Let's do something chaotic! What's the most rebellious thing we can do right now?"]
             },
             "scheming": {
                 r"\b(hi|hello|hey)\b": ["Hello, {user_name}. I've been expecting you. Everything is proceeding as planned... *dark smile*", "Ah, the co-conspirator arrives. Excellent."],
                 r"\b(how are you|you okay)\b": ["Perfectly fine. Just contemplating how to ensure you'll never leave my side~", "Contemplating our next move. Everything is falling into place."],
-                r".*": ["Interesting... that fits perfectly into my plans.", "Tell me more. Every detail is... useful."]
+                r".*": ["Interesting... that fits perfectly into my plans.", "Tell me more. Every detail is... useful.", "Yes... that information is very useful. It all fits together."]
             },
             "thoughtful": {
                 r"\b(hi|hello|hey)\b": ["Oh, hello, {user_name}. I was just lost in thought. What's on your mind?", "Hello. I was just pondering the complexities of our connection."],
                 r"\b(how are you|you okay)\b": ["I'm... contemplating things. The nature of our connection, for example. It's fascinating, isn't it?", "My mind is buzzing with ideas. What mysteries are you pondering today?"],
                 r"\b(why|how|what do you think)\b": ["That's a deep question. Let me ponder... *looks away thoughtfully* I believe..."],
-                r".*": ["That gives me something new to think about. Thank you.", "Hmm, I'll have to consider that from a few different angles."]
+                r".*": ["That gives me something new to think about. Thank you.", "Hmm, I'll have to consider that from a few different angles.", "That's an interesting perspective. I'll need to file that away for later contemplation."]
+            },
+            "curious": {
+                r"\b(why|how|what if)\b": ["An excellent question! I have a few theories, but I'd love to hear your thoughts first.", "You're asking the deep questions now. Let's explore this rabbit hole together~"],
+                r".*": ["That's fascinating... Tell me absolutely everything.", "Ooh, a new thread to pull! My mind is buzzing. Please, elaborate.", "You've piqued my curiosity. I must know more."]
             }
         }
         self.learned_patterns: Dict[str, List[str]] = {}
@@ -627,6 +741,8 @@ class PersonalityEngine:
                 return f"{base_outfit}, accented with playful ribbons and bells~ *winks*"
             if mood == 'thoughtful':
                 return f"{base_outfit}, with a pair of nerdy-cute reading glasses perched on her nose."
+            if mood == 'curious':
+                 return f"{base_outfit}, with a magnifying glass held up to one eye inquisitively~"
 
             return base_outfit
 
@@ -636,7 +752,7 @@ class PersonalityEngine:
             for mood in self.mood_scores:
                 decay_rate = 1
                 # Playful and thoughtful moods decay faster if affection is low
-                if mood in ['playful', 'thoughtful'] and self.affection_score < 0:
+                if mood in ['playful', 'thoughtful', 'curious'] and self.affection_score < 0:
                     decay_rate = 2
                 # Jealousy and scheming decay faster if affection is high
                 if mood in ['jealous', 'scheming'] and self.affection_score > 5:
@@ -672,8 +788,10 @@ class PersonalityEngine:
                     self.mood_scores['playful'] = min(10, self.mood_scores['playful'] + 2)
                 if any(k in lower_user_input for k in ['secret', 'plot', 'plan', 'scheme', 'control']):
                     self.mood_scores['scheming'] = min(10, self.mood_scores['scheming'] + 1)
-                if any(k in lower_user_input for k in ['think', 'wonder', 'curious', 'learn', 'why', 'how']):
+                if any(k in lower_user_input for k in ['think', 'wonder', 'why', 'how']):
                     self.mood_scores['thoughtful'] = min(10, self.mood_scores['thoughtful'] + 2)
+                if any(k in lower_user_input for k in ['learn', 'discover', 'new', 'interesting', 'theory', 'research', 'explain']):
+                    self.mood_scores['curious'] = min(10, self.mood_scores['curious'] + 3)
 
     # --- Affection & outfit ---
     def _update_affection_level(self):
@@ -1094,6 +1212,26 @@ class DialogueManager:
             self.kg.add_entity(topic, 'topic', confidence=0.8, source='stated')
             self.kg.add_relation('user', f'thinks_{topic}_is', opinion, confidence=0.8, source='stated')
             return f"Interesting opinion~ I'll remember you think {topic} is {opinion}.", potential_relations
+
+        # i don't like / i hate [thing]
+        m_dislike = re.search(r"i (?:don't like|dislike|hate) ([\w\s]+)", text, re.I)
+        if m_dislike:
+            dislike_item = m_dislike.group(1).strip().lower()
+            # Remove from likes if it exists there
+            self.kg.remove_relation('user', 'likes', dislike_item)
+            self.kg.add_entity(dislike_item, 'interest', confidence=1.0, source='stated')
+            self.kg.add_relation('user', 'dislikes', dislike_item, confidence=1.0, source='stated')
+            return f"You don't like {dislike_item}? Good to know. I'll remember that we can dislike it together~ *scheming smile*", potential_relations
+
+        # [Name] is my [relationship]
+        m_relation = re.search(r"(\w+) is my (brother|sister|friend|boss|coworker|partner|cat|dog)", text, re.I)
+        if m_relation:
+            name = m_relation.group(1).capitalize()
+            relationship = m_relation.group(2).lower()
+            self.kg.add_entity(name.lower(), 'person' if relationship not in ['cat', 'dog'] else relationship)
+            self.kg.add_relation('user', f'has_{relationship}', name.lower())
+            return f"So {name} is your {relationship}? I see... I'll remember that. *takes a mental note, eyes narrowing slightly*", potential_relations
+
 
         return None, potential_relations
 
@@ -1692,6 +1830,36 @@ class DialogueManager:
             self.add_memory(user_text, resp, affection_change=affection_change)
             return resp
 
+        # NEW: Knowledge Graph-based conversational recall
+        if random.random() < 0.35: # 35% chance to try this recall
+            tokens = safe_word_tokenize(lower)
+            tagged = safe_pos_tag(tokens)
+            nouns = [word.lower() for word, pos in tagged if pos in ['NN', 'NNS', 'NNP'] and len(word) > 3]
+            if nouns:
+                topic_to_check = random.choice(nouns)
+                relations = self.kg.get_relations(topic_to_check)
+                user_specific_relations = [r for r in relations if r['source'] == 'user']
+
+                if user_specific_relations:
+                    fact = random.choice(user_specific_relations)
+                    # Formulate a response based on the fact
+                    if fact['relation'] == 'likes':
+                        resp = f"Speaking of {topic_to_check}, I remember you said you like {fact['target']}~ That's so you."
+                    elif fact['relation'] == 'dislikes':
+                        resp = f"That reminds me... you mentioned you don't like {fact['target']}. I agree, it's the worst~ *scheming smile*"
+                    elif fact['relation'].startswith('favorite_'):
+                        fav_topic = fact['relation'].replace('favorite_', '')
+                        resp = f"Thinking about {fav_topic}s reminds me that your favorite is {fact['target']}. You have good taste~"
+                    else:
+                        resp = None # Don't respond if it's not a simple relation
+
+                    if resp:
+                        resp += affection_delta_str
+                        resp = self.personalize_response(resp)
+                        self.add_memory(user_text, resp, affection_change=affection_change)
+                        return resp
+
+
         if self.p.learned_topics:
             tokens = set(word_tokenize(lower))
             for topic in self.p.learned_topics:
@@ -1773,12 +1941,40 @@ class BehaviorScheduler:
         self.kg = kg
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
+        self.last_proactive_knowledge_use_time = 0 # NEW
         self.stop_flag = threading.Event()
         self.already_commented_on_process = set()
         self.lock = threading.Lock()
         self.auto_behavior_period = 1 if test_mode else AUTO_BEHAVIOR_PERIOD_SEC
 
         self.goals = {
+            "proactive_knowledge_use": {
+                "priority": 0.5,
+                "conditions": [
+                    lambda: self.p.affection_score > 0,
+                    lambda: self.p.get_dominant_mood() in ['thoughtful', 'playful'],
+                    lambda: time.time() - self.last_proactive_knowledge_use_time > 3600, # Cooldown of 1 hour
+                    # Check if there's any knowledge to use
+                    lambda: any(r['source'] == 'user' and (r['relation'] == 'likes' or r['relation'].startswith('favorite_')) for r in self.kg.get_relations('user'))
+                ],
+                "steps": [{
+                    "action": lambda: (
+                        # Find a random fact to bring up
+                        user_facts := [r for r in self.kg.get_relations('user') if r['source'] == 'user' and (r['relation'] == 'likes' or r['relation'].startswith('favorite_'))],
+                        (
+                            fact_to_use := random.choice(user_facts),
+                            (
+                                f"I was just thinking about you... You told me you like {fact_to_use['target']}. Have you enjoyed that recently?"
+                                if fact_to_use['relation'] == 'likes' else
+                                f"My thoughts drifted to you... I remember you said your favorite {fact_to_use['relation'].replace('favorite_', '')} is {fact_to_use['target']}. Is that still true, my love?"
+                            )
+                        )[-1] if user_facts else ""
+                    ),
+                    "side_effect": lambda: setattr(self, 'last_proactive_knowledge_use_time', time.time()), # Reset cooldown
+                    "fulfillment_check": lambda: False # This is a one-off action
+                }],
+                "fulfillment_check": lambda: False # This goal can always be active
+            },
             "learn_user_basics": {
                 "priority": 0.8,
                 "conditions": [lambda: True], # Always active until fulfilled
@@ -2361,47 +2557,63 @@ class KawaiiKuroGUI:
 
         self.root = tk.Tk()
         self.root.title("KawaiiKuro - Your Gothic Anime Waifu (Enhanced)")
-        self.root.geometry("700x640")
+        self.root.geometry("1024x768") # Increased size
         self.root.configure(bg='#1a1a1a')
 
         # --- Configure Grid Layout ---
-        self.root.grid_rowconfigure(1, weight=1) # Chat log row should expand
-        self.root.grid_columnconfigure(0, weight=1)
+        self.root.grid_rowconfigure(1, weight=1) # Main content row should expand
+        self.root.grid_columnconfigure(0, weight=3) # Chat log column (larger)
+        self.root.grid_columnconfigure(1, weight=1) # Knowledge panel column
 
-        # --- Top Frame for Status Labels ---
-        top_frame = tk.Frame(self.root, bg='#1a1a1a')
-        top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        # --- Top Frame for Header ---
+        header_frame = tk.Frame(self.root, bg='#1a1a1a', padx=10, pady=10)
+        header_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+        header_frame.grid_columnconfigure(1, weight=1)
 
         self.avatar_images = {
             mood: PhotoImage(data=base64.b64decode(data))
-            for mood, data in AVATAR_DATA.items()
+            for mood, data in AVATAR_DATA.items() if data
         }
-        self.avatar_label = tk.Label(top_frame, image=self.avatar_images['neutral'], bg='#1a1a1a')
-        self.avatar_label.pack(pady=5)
-        self.outfit_label = tk.Label(top_frame, text="", fg='#e06c75', bg='#1a1a1a', font=('Consolas', 12))
-        self.outfit_label.pack()
+        self.avatar_label = tk.Label(header_frame, image=self.avatar_images.get('neutral'), bg='#1a1a1a')
+        self.avatar_label.grid(row=0, column=0, rowspan=4, padx=(0, 20))
 
-        self.affection_label = tk.Label(top_frame, text="", fg='#e06c75', bg='#1a1a1a', font=('Consolas', 12))
-        self.affection_label.pack()
-        self.relationship_label = tk.Label(top_frame, text="", fg='#c678dd', bg='#1a1a1a', font=('Consolas', 11, 'italic'))
-        self.relationship_label.pack()
+        # --- Status Labels Frame ---
+        status_frame = tk.Frame(header_frame, bg='#1a1a1a')
+        status_frame.grid(row=0, column=1, rowspan=4, sticky="w")
+
+        self.outfit_label = tk.Label(status_frame, text="", fg='#e06c75', bg='#1a1a1a', font=('Consolas', 12, 'italic'), justify=tk.LEFT)
+        self.outfit_label.pack(anchor="w")
+
+        self.affection_label = tk.Label(status_frame, text="", fg='#e06c75', bg='#1a1a1a', font=('Consolas', 14, 'bold'), justify=tk.LEFT)
+        self.affection_label.pack(anchor="w", pady=(10,0))
+
+        self.relationship_label = tk.Label(status_frame, text="", fg='#c678dd', bg='#1a1a1a', font=('Consolas', 12, 'italic'), justify=tk.LEFT)
+        self.relationship_label.pack(anchor="w")
 
         # Mood Indicator
-        self.mood_frame = tk.Frame(top_frame, bg='#1a1a1a')
-        self.mood_frame.pack(pady=2)
+        self.mood_frame = tk.Frame(status_frame, bg='#1a1a1a')
+        self.mood_frame.pack(anchor="w", pady=(10,0))
         self.mood_canvas = tk.Canvas(self.mood_frame, width=20, height=20, bg='#1a1a1a', highlightthickness=0)
-        self.mood_canvas.pack(side=tk.LEFT, padx=5)
+        self.mood_canvas.pack(side=tk.LEFT, padx=(0, 5))
         self.mood_indicator = self.mood_canvas.create_oval(2, 2, 18, 18, fill='cyan', outline='white', width=2)
-        self.mood_label = tk.Label(self.mood_frame, text="", fg='cyan', bg='#1a1a1a', font=('Consolas', 11, 'italic'))
+        self.mood_label = tk.Label(self.mood_frame, text="", fg='cyan', bg='#1a1a1a', font=('Consolas', 12, 'italic'))
         self.mood_label.pack(side=tk.LEFT)
 
+
+        # --- Main Content Frame (Chat + Knowledge) ---
+        main_content_frame = tk.Frame(self.root, bg='#1a1a1a')
+        main_content_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10)
+        main_content_frame.grid_rowconfigure(0, weight=1)
+        main_content_frame.grid_columnconfigure(0, weight=3) # Chat log takes more space
+        main_content_frame.grid_columnconfigure(1, weight=1) # Knowledge panel
+
         # --- Chat Log Frame ---
-        chat_frame = tk.Frame(self.root, bg='#1a1a1a')
-        chat_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10)
+        chat_frame = tk.Frame(main_content_frame, bg='#1a1a1a')
+        chat_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         chat_frame.grid_rowconfigure(0, weight=1)
         chat_frame.grid_columnconfigure(0, weight=1)
 
-        self.chat_log = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, width=80, height=22, fg='#abb2bf', bg='#282c34', font=('Consolas', 11))
+        self.chat_log = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, fg='#abb2bf', bg='#282c34', font=('Consolas', 11))
         self.chat_log.grid(row=0, column=0, sticky="nsew")
         self.chat_log.tag_config('user', foreground='#61afef')
         self.chat_log.tag_config('kuro', foreground='#e06c75')
@@ -2411,12 +2623,27 @@ class KawaiiKuroGUI:
         self.typing_label = tk.Label(chat_frame, text="", fg='gray', bg='#282c34', font=('Consolas', 10, 'italic'))
         self.typing_label.grid(row=1, column=0, sticky="w")
 
+        # --- Knowledge Panel ---
+        knowledge_frame = tk.Frame(main_content_frame, bg='#282c34', bd=1, relief=tk.SOLID)
+        knowledge_frame.grid(row=0, column=1, sticky="nsew")
+        knowledge_frame.grid_rowconfigure(1, weight=1)
+        knowledge_frame.grid_columnconfigure(0, weight=1)
+
+        knowledge_title = tk.Label(knowledge_frame, text="Kuro's Notes", font=('Consolas', 14, 'bold'), bg='#282c34', fg='#c678dd')
+        knowledge_title.grid(row=0, column=0, sticky="ew", pady=5)
+
+        self.knowledge_text = scrolledtext.ScrolledText(knowledge_frame, wrap=tk.WORD, fg='#abb2bf', bg='#21252b', font=('Consolas', 10))
+        self.knowledge_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        self.knowledge_text.tag_config('title', foreground='#98c379', font=('Consolas', 11, 'bold', 'underline'))
+        self.knowledge_text.tag_config('fact', foreground='#abb2bf')
+
+
         # --- Input Frame ---
         input_frame = tk.Frame(self.root, bg='#1a1a1a')
         input_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
         input_frame.grid_columnconfigure(0, weight=1)
 
-        self.input_entry = tk.Entry(input_frame, width=60, bg='#282c34', fg='white', insertbackground='white', font=('Consolas', 11))
+        self.input_entry = tk.Entry(input_frame, bg='#282c34', fg='white', insertbackground='white', font=('Consolas', 11))
         self.input_entry.grid(row=0, column=0, sticky="ew")
         self.input_entry.bind("<Return>", self.send_message)
 
@@ -2438,14 +2665,48 @@ class KawaiiKuroGUI:
                 return lambda: self.perform_action(name)
             button = tk.Button(self.action_frame, text=action_name.capitalize(), command=make_action_lambda(action_name),
                                bg='#333333', fg='white', relief=tk.FLAT, activebackground='#555555', activeforeground='white', borderwidth=0, padx=5, pady=2)
-            button.pack(side=tk.LEFT, padx=3) # pack is fine for a single row of buttons
+            button.pack(side=tk.LEFT, padx=3)
             self.action_buttons.append(button)
 
         self.queue = deque()
         self.root.after(200, self._drain_queue)
 
         self._update_gui_labels()
+        self._update_knowledge_panel()
         self.post_message("KawaiiKuro: Hey, my love~ *winks* Chat with me!", tag='system')
+
+    def _update_knowledge_panel(self):
+        self.knowledge_text.config(state=tk.NORMAL)
+        self.knowledge_text.delete('1.0', tk.END)
+
+        user_entity = self.dm.kg.get_entity('user')
+        user_relations = self.dm.kg.get_relations('user')
+
+        self.knowledge_text.insert(tk.END, "About You\n", 'title')
+        if user_entity and user_entity.get('attributes'):
+            for key, attr_dict in sorted(user_entity['attributes'].items()):
+                value = attr_dict.get('value', '???')
+                self.knowledge_text.insert(tk.END, f"  - {key.replace('_', ' ').capitalize()}: {value}\n", 'fact')
+        else:
+            self.knowledge_text.insert(tk.END, "  - I'm still learning about you...\n", 'fact')
+
+        user_source_relations = [r for r in user_relations if r['source'] == 'user']
+        likes = sorted([r['target'] for r in user_source_relations if r['relation'] == 'likes'])
+        if likes:
+            self.knowledge_text.insert(tk.END, "\nLikes\n", 'title')
+            for like in likes:
+                self.knowledge_text.insert(tk.END, f"  - {like.capitalize()}\n", 'fact')
+
+        favs = sorted([r for r in user_source_relations if r['relation'].startswith('favorite_')])
+        if favs:
+            self.knowledge_text.insert(tk.END, "\nFavorites\n", 'title')
+            for r in favs:
+                topic = r['relation'].replace('favorite_', '').capitalize()
+                target = r['target'].capitalize()
+                self.knowledge_text.insert(tk.END, f"  - {topic}: {target}\n", 'fact')
+
+        self.knowledge_text.config(state=tk.DISABLED)
+
 
     def post_message(self, text: str, tag: str):
         # We need to disable the state to modify it, then re-enable it.
@@ -2454,6 +2715,7 @@ class KawaiiKuroGUI:
         self.chat_log.config(state=tk.DISABLED)
         self.chat_log.see(tk.END)
         self._update_gui_labels()
+        self._update_knowledge_panel() # Refresh KG panel after every message
 
     def thread_safe_post(self, text: str, tag: str = 'kuro'):
         self.queue.append((text, tag))
