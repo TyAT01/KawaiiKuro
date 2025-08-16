@@ -2413,17 +2413,27 @@ class KawaiiKuroGUI:
         outfit = self.p.get_current_outfit()
         dominant_mood = self.p.get_dominant_mood()
         mood_color_map = {
-            'jealous': '#301934',  # Dark Purple
-            'scheming': '#2E2D2D', # Dark Gray
-            'playful': '#4B0082',  # Indigo
-            'thoughtful': '#000080', # Navy
+            'jealous': '#4B0082',  # Dark Purple for Jealousy
+            'scheming': '#2E2D2D', # Dark Gray for Scheming
+            'playful': '#8A2BE2',  # BlueViolet for Playful
+            'thoughtful': '#000080', # Navy for Thoughtful
             'neutral': 'black'
         }
 
+        ascii_avatars = {
+            'jealous': "(`_´)",
+            'scheming': "(¬‿¬)",
+            'playful': "(^ω^)",
+            'thoughtful': "(~_~)",
+            'neutral': "(´• ω •`)",
+        }
+
+        avatar = ascii_avatars.get(dominant_mood, ascii_avatars['neutral'])
         mood_indicator_color = mood_color_map.get(dominant_mood, 'cyan')
+
         self.mood_canvas.itemconfig(self.mood_indicator, fill=mood_indicator_color)
 
-        self.avatar_label.config(text=f"KawaiiKuro in {outfit}")
+        self.avatar_label.config(text=f"{avatar}\nKawaiiKuro in {outfit}")
         self.affection_label.config(text=f"Affection: {self.p.affection_score} {self._hearts()}")
         self.relationship_label.config(text=f"Relationship: {self.p.relationship_status}")
         self.mood_label.config(text=f"Mood: {dominant_mood.capitalize()}~")
@@ -2431,16 +2441,17 @@ class KawaiiKuroGUI:
         # Determine background color
         bg_color = 'black'
         if self.p.affection_level >= 5 and self.p.spicy_mode:
-            bg_color = 'darkred'
+            bg_color = '#8B0000' # Dark Red for Spicy
         else:
             bg_color = mood_color_map.get(dominant_mood, 'black')
 
         self.root.configure(bg=bg_color)
         # Also update label backgrounds to match
-        for widget in [self.avatar_label, self.affection_label, self.relationship_label, self.mood_label, self.typing_label, self.mood_frame, self.mood_canvas]:
+        for widget in [self.avatar_label, self.affection_label, self.relationship_label, self.mood_label, self.typing_label, self.mood_frame, self.mood_canvas, self.action_frame]:
             widget.configure(bg=bg_color)
 
-        self.action_frame.configure(bg=bg_color)
+        for button in self.action_buttons:
+            button.configure(bg='#333333' if bg_color == 'black' else '#555555')
 
     def send_message(self, event=None):
         user_input = self.input_entry.get()
@@ -2520,6 +2531,7 @@ class KawaiiKuroGUI:
 # App wiring
 # -----------------------------
 
+from enhanced_scheduler import EnhancedBehaviorScheduler
 import argparse
 
 def main():
@@ -2573,7 +2585,7 @@ def main():
     if not args.no_gui:
         gui = KawaiiKuroGUI(dialogue, personality, voice)
 
-        scheduler = BehaviorScheduler(
+        scheduler = EnhancedBehaviorScheduler(
             voice=voice,
             dialogue=dialogue,
             personality=personality,
@@ -2581,6 +2593,7 @@ def main():
             system=system_awareness,
             gui_ref=lambda text: gui.thread_safe_post(text),
             kg=kg,
+            test_mode=args.test_mode
         )
         scheduler.start()
 
@@ -2595,7 +2608,7 @@ def main():
             scheduler.stop()
     else:
         # In headless mode, post autonomous messages to console
-        scheduler = BehaviorScheduler(
+        scheduler = EnhancedBehaviorScheduler(
             voice=voice,
             dialogue=dialogue,
             personality=personality,
