@@ -89,6 +89,26 @@
       "rival_names": [],
       "affection_change": 1,
       "is_fact_learning": true
+    },
+    {
+      "user": "my name is Alex\n",
+      "response": "It's a pleasure to know your name, Alex~ *blushes*",
+      "timestamp": "2025-08-16 19:36:04",
+      "sentiment": {
+        "neg": 0.0,
+        "neu": 1.0,
+        "pos": 0.0,
+        "compound": 0.0
+      },
+      "keywords": [
+        "my",
+        "name",
+        "is",
+        "alex"
+      ],
+      "rival_names": [],
+      "affection_change": 1,
+      "is_fact_learning": true
     }
   ],
   "memory_summaries": [],

@@ -65,8 +65,22 @@ try:
 except Exception:
     psutil = None
 
+import base64
 import tkinter as tk
+from tkinter import PhotoImage
 from tkinter import scrolledtext
+
+# -----------------------------
+# Embedded Assets
+# -----------------------------
+AVATAR_DATA = {
+    # Placeholders - these are not real images, but demonstrate the feature.
+    "neutral": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAADFJREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMZoAADg3QB/nU2VEwAAAABJRU5ErkJggg==",
+    "playful": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAEFJREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMbQAGAADsAJcEF8fX19Z2BggAFQ4w2mAUgJALyMAQBx6w0uAAAAAElFTkSuQmCC",
+    "jealous": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAADtJREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMZg1AAjA0MdyAEA0bkB74g+k9sAAAAASUVORK5CYII=",
+    "scheming": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAD5JREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMZg1AAjA0MdQAEAdG4Af3NDI9sAAAAASUVORK5CYII=",
+    "thoughtful": "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAD9JREFUOE9jZKAQMFKon2FwgyFGQ4w2mMZg1gBFQ4w2mMZg1gBFQ4w2mMZg1AAjA0MdQAEA6NwA/iCGw28AAAAASUVORK5CYII=",
+}
 
 # NLP
 import nltk
@@ -408,97 +422,80 @@ class KnowledgeGraph:
             else:  # Remove all relations of this type from the source
                 self.relations = [r for r in self.relations if not (r['source'] == source_entity and r['relation'] == relation)]
 
-    def infer_new_relations(self, text: str):
+    def infer_new_relations(self, text: str) -> List[Dict[str, Any]]:
         with self.lock:
-            # This is a complex NLP task. For now, we'll implement some simple heuristics.
-
-            # Heuristic 1: "X is a Y"
-            # e.g., "Dune is a great sci-fi book" -> dune is_a sci-fi_book
+            potential_relations = []
             try:
                 sentences = safe_sent_tokenize(text)
                 for sentence in sentences:
-                    # More robust regex to capture variations
+                    # Heuristic 1: "X is a Y"
                     m_is_a = re.search(r"([\w\s']+?) is (?:a|an|my favorite|the best) (?:great|amazing|terrible|awesome|)\s?([\w\s']+)", sentence, re.I)
                     if m_is_a:
                         entity_a_phrase = m_is_a.group(1).strip()
                         entity_b_phrase = m_is_a.group(2).strip()
-
-                        # We want to find the core nouns.
                         pos_a = safe_pos_tag(safe_word_tokenize(entity_a_phrase))
-
-                        # Get the last noun/proper noun as the entity name
                         entity_a = next((word for word, pos in reversed(pos_a) if pos in ['NN', 'NNS', 'NNP']), None)
-
-                        # For entity B, we take the whole phrase as it's a category
-                        entity_b = entity_b_phrase.lower().replace(" book", "").replace(" movie", "").replace(" game", "") # simple normalization
-
+                        entity_b = entity_b_phrase.lower().replace(" book", "").replace(" movie", "").replace(" game", "")
                         if entity_a:
                             entity_a = entity_a.lower()
-                            # Avoid trivial statements like "my name is jules" or "this is a thing"
                             if entity_a not in ["name", "favorite", "hobby", "it", "this"] and entity_b not in ["thing", "one", "person"]:
-                                # Add the instance as an entity, with its type being the category
-                                self.add_entity(entity_a, entity_b, confidence=0.7, source='inferred')
-                                # Add the relationship
-                                self.add_relation(entity_a, 'is_a', entity_b, confidence=0.7, source='inferred')
-                    # --- NEW HEURISTIC ---
+                                potential_relations.append({'subject': entity_a, 'verb': 'is_a', 'object': entity_b, 'confidence': 0.7, 'type': 'is_a'})
+
                     # Heuristic 2: "[My/The] X is Y" for properties
-                    # e.g., "My car is red", "The sky is blue"
                     m_has_prop = re.search(r"(?:my|the)\s+([\w\s]+?)\s+is\s+([\w\s]+)", sentence, re.I)
                     if m_has_prop:
                         entity_phrase = m_has_prop.group(1).strip()
                         prop_phrase = m_has_prop.group(2).strip()
-
-                        # Simple normalization
                         entity_name = entity_phrase.lower()
                         prop_value = prop_phrase.lower()
-
-                        # Avoid capturing junk like "my name is Jules" which is handled elsewhere
                         if entity_name not in ["name", "favorite", "hobby"]:
-                             # Add the entity if it's new
-                            self.add_entity(entity_name, 'object', confidence=0.6, source='inferred')
-                            # Add the relation
-                            self.add_relation(entity_name, 'has_property', prop_value, confidence=0.6, source='inferred')
+                            potential_relations.append({'subject': entity_name, 'verb': 'has_property', 'object': prop_value, 'confidence': 0.6, 'type': 'has_property'})
 
                     # Heuristic 3: "I have a(n) X"
                     m_has_a = re.search(r"i have (?:a|an)\s+([\w\s]+)", sentence, re.I)
                     if m_has_a:
                         thing_name = m_has_a.group(1).strip().lower()
-                        if thing_name not in ["feeling", "question", "idea"]: # Avoid abstract things
-                            self.add_entity(thing_name, 'object', confidence=0.8, source='inferred')
-                            self.add_relation('user', 'has', thing_name, confidence=0.8, source='inferred')
+                        if thing_name not in ["feeling", "question", "idea"]:
+                            potential_relations.append({'subject': 'user', 'verb': 'has', 'object': thing_name, 'confidence': 0.8, 'type': 'has'})
 
                     # Heuristic 4: Causal Relationships ("X causes Y")
                     m_causes = re.search(r"([\w\s]+?)\s+(?:causes|leads to|results in)\s+([\w\s]+)", sentence, re.I)
                     if m_causes:
                         cause_phrase = m_causes.group(1).strip().lower()
                         effect_phrase = m_causes.group(2).strip().lower()
-
-                        # Simple normalization for now, taking the last word as the entity
                         cause_entity = cause_phrase.split()[-1]
                         effect_entity = effect_phrase.split()[-1]
-
                         if cause_entity and effect_entity and cause_entity != effect_entity:
-                            self.add_entity(cause_entity, 'event/concept', confidence=0.6, source='inferred')
-                            self.add_entity(effect_entity, 'event/concept', confidence=0.6, source='inferred')
-                            self.add_relation(cause_entity, 'causes', effect_entity, confidence=0.6, source='inferred')
+                            potential_relations.append({'subject': cause_entity, 'verb': 'causes', 'object': effect_entity, 'confidence': 0.6, 'type': 'causes'})
 
                     # Heuristic 5: User Opinions ("I think X is Y")
                     m_opinion = re.search(r"i (?:think|feel|find|believe)\s+([\w\s]+?)\s+is\s+([\w\s]+)", sentence, re.I)
                     if m_opinion:
                         entity_phrase = m_opinion.group(1).strip().lower()
                         opinion_phrase = m_opinion.group(2).strip().lower()
-
-                        # Avoid capturing self-referential or vague opinions
                         if entity_phrase not in ["it", "that", "this"]:
-                            # Simple normalization
                             entity_name = entity_phrase.replace("the ", "").replace("a ", "").replace("an ", "")
+                            potential_relations.append({'subject': entity_name, 'verb': 'has_property', 'object': opinion_phrase, 'confidence': 0.7, 'type': 'has_property_opinion'})
 
-                            self.add_entity(entity_name, 'topic', confidence=0.7, source='inferred_opinion')
-                            self.add_relation(entity_name, 'has_property', opinion_phrase, confidence=0.7, source='inferred_opinion')
-
+                    # Heuristic 6: Third-Party Relations (e.g., "John likes pizza")
+                    tokens = safe_word_tokenize(sentence)
+                    tagged = safe_pos_tag(tokens)
+                    for i, (word, pos) in enumerate(tagged):
+                        if pos == 'NNP' and word.lower() not in ['i', 'user', 'kawaiikuro'] and word not in SAFE_PERSON_NAME_STOPWORDS:
+                            if i + 1 < len(tagged):
+                                verb = tagged[i+1][0].lower()
+                                if verb in ['likes', 'enjoys', 'hates', 'dislikes', 'is', 'was', 'has']:
+                                    if i + 2 < len(tagged):
+                                        subject_entity = word.lower()
+                                        relation_verb = verb
+                                        object_phrase = ' '.join(tokens[i+2:])
+                                        object_phrase = re.sub(r"^(a|an|the)\s+", "", object_phrase).strip()
+                                        if subject_entity and object_phrase:
+                                            potential_relations.append({'subject': subject_entity, 'verb': relation_verb, 'object': object_phrase.lower(), 'confidence': 0.6, 'type': 'third_party_relation'})
+                                            break
             except Exception:
-                # NLTK can sometimes fail, so we wrap this in a try-except block to be safe.
                 pass
+        return potential_relations
 
     def to_dict(self) -> Dict[str, Any]:
         with self.lock:
@@ -862,6 +859,9 @@ class DialogueManager:
         self.math = math_eval
         self.kg = kg
         self.learned_patterns: Dict[str, List[str]] = {}
+        self.pending_relation: Optional[Dict[str, Any]] = None
+        self.current_topic: Optional[str] = None
+        self.conversation_turn_on_topic: int = 0
         self.lock = threading.Lock()
 
     def parse_fact(self, text: str) -> Optional[Tuple[str, Any]]:
@@ -980,17 +980,17 @@ class DialogueManager:
             return "My apologies. I'll try to be more careful."
         return None
 
-    def extract_and_store_facts(self, text: str) -> Optional[str]:
+    def extract_and_store_facts(self, text: str) -> Tuple[Optional[str], List[Dict[str, Any]]]:
         # Always ensure the 'user' entity exists.
         self.kg.add_entity('user', 'person')
-        self.kg.infer_new_relations(text)
+        potential_relations = self.kg.infer_new_relations(text)
 
         # my name is ...
         m_name = re.search(r"my name is (\w+)", text, re.I)
         if m_name:
             name = m_name.group(1).capitalize()
             self.kg.add_entity('user', 'person', attributes={'name': name}, confidence=1.0, source='stated')
-            return f"It's a pleasure to know your name, {name}~ *blushes*"
+            return f"It's a pleasure to know your name, {name}~ *blushes*", potential_relations
 
         # my favorite ... is ...
         m_fav = re.search(r"my favorite (\w+) is ([\w\s]+)", text, re.I)
@@ -999,7 +999,7 @@ class DialogueManager:
             value = m_fav.group(2).strip().lower()
             self.kg.add_entity(value, key, confidence=1.0, source='stated')
             self.kg.add_relation('user', f'favorite_{key}', value, confidence=1.0, source='stated')
-            return f"I'll remember that your favorite {key} is {value}~ *takes a small note*"
+            return f"I'll remember that your favorite {key} is {value}~ *takes a small note*", potential_relations
 
         # i like ... (but not "i like you")
         m_like = re.search(r"i like (?!you)([\w\s]+)", text, re.I)
@@ -1007,21 +1007,21 @@ class DialogueManager:
             like_item = m_like.group(1).strip().lower()
             self.kg.add_entity(like_item, 'interest', confidence=1.0, source='stated')
             self.kg.add_relation('user', 'likes', like_item, confidence=1.0, source='stated')
-            return f"I'll remember you like {like_item}~ *giggles*"
+            return f"I'll remember you like {like_item}~ *giggles*", potential_relations
 
         # i am from [location]
         m_from = re.search(r"i(?:'m| am) from ([\w\s]+)", text, re.I)
         if m_from:
             location = m_from.group(1).strip()
             self.kg.add_entity('user', 'person', attributes={'hometown': location}, confidence=1.0, source='stated')
-            return f"You're from {location}? How interesting~ I'll have to imagine what it's like."
+            return f"You're from {location}? How interesting~ I'll have to imagine what it's like.", potential_relations
 
         # i live in [location]
         m_live = re.search(r"i live in ([\w\s]+)", text, re.I)
         if m_live:
             location = m_live.group(1).strip()
             self.kg.add_entity('user', 'person', attributes={'current_city': location}, confidence=1.0, source='stated')
-            return f"So you live in {location}... I'll feel closer to you knowing that."
+            return f"So you live in {location}... I'll feel closer to you knowing that.", potential_relations
 
         # i work as / i am a [profession]
         m_work = re.search(r"i work as an? ([\w\s]+)|i am an? ([\w\s]+)", text, re.I)
@@ -1029,21 +1029,34 @@ class DialogueManager:
             profession = (m_work.group(1) or m_work.group(2) or "").strip()
             if profession and len(profession.split()) < 4:
                 self.kg.add_entity('user', 'person', attributes={'profession': profession}, confidence=1.0, source='stated')
-                return f"A {profession}? That sounds so cool and nerdy~ Tell me more about it sometime!"
+                return f"A {profession}? That sounds so cool and nerdy~ Tell me more about it sometime!", potential_relations
 
         # i am [age] years old
         m_age = re.search(r"i(?:'m| am) (\d{1,2})(?: years old)?", text, re.I)
         if m_age:
             age = int(m_age.group(1))
             self.kg.add_entity('user', 'person', attributes={'age': age}, confidence=1.0, source='stated')
-            return f"{age}... a perfect age. I'll keep that a secret, just between us~"
+            return f"{age}... a perfect age. I'll keep that a secret, just between us~", potential_relations
+
+        # my birthday is [Month Day]
+        m_birthday = re.search(r"(?:my birthday is|i was born on)\s+((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?)", text, re.I)
+        if m_birthday:
+            try:
+                bday_text = m_birthday.group(1)
+                bday_text_cleaned = re.sub(r"(\d+)(st|nd|rd|th)", r"\1", bday_text)
+                date_obj = datetime.strptime(bday_text_cleaned, '%B %d')
+                birthday_str = date_obj.strftime('%m-%d')
+                self.kg.add_entity('user', 'person', attributes={'birthday': birthday_str}, confidence=1.0, source='stated')
+                return f"Ooh, a birthday! I'll make sure to remember {bday_text}~ *writes it down with a heart*", potential_relations
+            except ValueError:
+                pass # Ignore invalid dates for now
 
         # i work at [company]
         m_work_at = re.search(r"i work at ([\w\s]+)", text, re.I)
         if m_work_at:
             company = m_work_at.group(1).strip()
             self.kg.add_entity('user', 'person', attributes={'workplace': company}, confidence=1.0, source='stated')
-            return f"You work at {company}? I'll have to remember that~"
+            return f"You work at {company}? I'll have to remember that~", potential_relations
 
         # i have a [pet_type] named [pet_name]
         m_pet = re.search(r"i have a (\w+) named (\w+)", text, re.I)
@@ -1052,7 +1065,7 @@ class DialogueManager:
             pet_name = m_pet.group(2).capitalize()
             self.kg.add_entity(pet_name.lower(), pet_type, confidence=1.0, source='stated')
             self.kg.add_relation('user', 'has_pet', pet_name.lower(), confidence=1.0, source='stated')
-            return f"A {pet_type} named {pet_name}? So cute! I'm jealous~ You have to tell me all about them!"
+            return f"A {pet_type} named {pet_name}? So cute! I'm jealous~ You have to tell me all about them!", potential_relations
 
         # my pet's name is [pet_name]
         m_pet_name = re.search(r"my pet's name is (\w+)", text, re.I)
@@ -1061,7 +1074,7 @@ class DialogueManager:
             # We don't know the type, so we'll just add the entity as a 'pet'
             self.kg.add_entity(pet_name.lower(), 'pet', confidence=0.8, source='stated')
             self.kg.add_relation('user', 'has_pet', pet_name.lower(), confidence=0.8, source='stated')
-            return f"{pet_name}... what a cute name for a pet! I'll remember that."
+            return f"{pet_name}... what a cute name for a pet! I'll remember that.", potential_relations
 
         # my hobby is ... / i enjoy ...
         m_hobby = re.search(r"(?:my hobby is|i enjoy|i love to) ([\w\s]+)", text, re.I)
@@ -1071,7 +1084,7 @@ class DialogueManager:
             self.kg.add_relation('user', 'has_hobby', hobby, confidence=1.0, source='stated')
             # Also add it to likes, as it's a strong positive signal
             self.kg.add_relation('user', 'likes', hobby, confidence=1.0, source='stated')
-            return f"So your hobby is {hobby}? That's so cool! I'd love to hear more about it sometime."
+            return f"So your hobby is {hobby}? That's so cool! I'd love to hear more about it sometime.", potential_relations
 
         # i think [topic] is [opinion]
         m_opinion = re.search(r"i think ([\w\s]+) is ([\w\s]+)", text, re.I)
@@ -1080,9 +1093,9 @@ class DialogueManager:
             opinion = m_opinion.group(2).strip().lower()
             self.kg.add_entity(topic, 'topic', confidence=0.8, source='stated')
             self.kg.add_relation('user', f'thinks_{topic}_is', opinion, confidence=0.8, source='stated')
-            return f"Interesting opinion~ I'll remember you think {topic} is {opinion}."
+            return f"Interesting opinion~ I'll remember you think {topic} is {opinion}.", potential_relations
 
-        return None
+        return None, potential_relations
 
     def personalize_response(self, response: str) -> str:
         user_entity = self.kg.get_entity('user')
@@ -1240,6 +1253,27 @@ class DialogueManager:
             if fact_key.startswith('thinks_'):
                 topic = fact_key.split('_')[1]
                 return f"I remember you said you think {topic} is {fact_value}. Is that still your opinion?"
+
+        # NEW: Proactive memory probe
+        with self.m.lock: # Accessing memory manager's entries
+            if len(self.m.entries) > 10 and random.random() < 0.2: # 20% chance if enough memories exist
+                # Pick a random memory that is not just a simple greeting
+                meaningful_memories = [m for m in self.m.entries if len(m.user.split()) > 3]
+                if meaningful_memories:
+                    memory_to_probe = random.choice(meaningful_memories)
+
+                    # Probe based on sentiment
+                    sentiment = memory_to_probe.sentiment.get('compound', 0)
+                    if sentiment < -0.3:
+                        return f"I was just thinking... you seemed a bit down when you said '{memory_to_probe.user}'. Is everything okay now, my love?"
+                    elif sentiment > 0.3:
+                        return f"I remember when you told me '{memory_to_probe.user}'. It made me so happy to hear that~ Thinking about it still makes me smile."
+
+                    # Probe based on keywords
+                    keywords = [k for k in memory_to_probe.keywords if k not in safe_stopwords() and len(k) > 4]
+                    if keywords:
+                        keyword = random.choice(keywords)
+                        return f"Something just reminded me of when we talked about {keyword}. What are your thoughts on that now?"
 
         # NEW: Curiosity-driven questions to fill knowledge gaps
         is_thoughtful = 'thoughtful' in moods
@@ -1410,28 +1444,100 @@ class DialogueManager:
 
         return None
 
+    def _ask_clarification(self, relation: Dict[str, Any]) -> str:
+        self.pending_relation = relation
+        subject = relation['subject'].capitalize()
+        verb = relation['verb'].replace('_', ' ')
+        obj = relation['object']
+
+        # Simple formatting for the question
+        question = f"Did I hear you correctly... that {subject} {verb} {obj}? *tilts head curiously*"
+        return self.personalize_response(question)
+
+    def _maybe_shift_topic(self, current_response: str, user_text: str) -> str:
+        # Topic Management
+        all_text = user_text + " " + current_response
+        tokens = safe_word_tokenize(all_text.lower())
+        nouns = [word for word, pos in safe_pos_tag(tokens) if pos in ['NN', 'NNS'] and len(word) > 3 and word not in ['user', 'kawaiikuro']]
+        if nouns:
+            most_common_noun = Counter(nouns).most_common(1)[0][0]
+            if self.current_topic == most_common_noun:
+                self.conversation_turn_on_topic += 1
+            else:
+                self.current_topic = most_common_noun
+                self.conversation_turn_on_topic = 1
+
+        if self.current_topic and self.conversation_turn_on_topic >= 3 and random.random() < 0.4:
+            relations = self.kg.get_relations(self.current_topic)
+            if relations:
+                related_fact = random.choice(relations)
+                new_topic = related_fact['target'] if related_fact['source'] == self.current_topic else related_fact['source']
+                if new_topic != 'user' and new_topic != self.current_topic:
+                    transition_phrase = random.choice([
+                        f"Speaking of {self.current_topic}, it reminds me of {new_topic}.",
+                        f"That makes me think about {new_topic}. What are your thoughts on that?",
+                    ])
+                    self.current_topic = new_topic
+                    self.conversation_turn_on_topic = 1
+                    return current_response + " " + transition_phrase
+        return current_response
+
     def respond(self, user_text: str) -> str:
         lower = user_text.lower().strip()
 
-        # Handle corrections first
+        # 1. Handle pending clarifications first
+        if self.pending_relation:
+            if lower in ['yes', 'yep', 'correct', 'that is right', 'y']:
+                relation = self.pending_relation
+                # Add the confirmed relation to the knowledge graph
+                self.kg.add_entity(relation['subject'], 'unknown', source='confirmed_inferred')
+                self.kg.add_entity(relation['object'], 'unknown', source='confirmed_inferred')
+                self.kg.add_relation(relation['subject'], relation['verb'], relation['object'], confidence=1.0, source='confirmed_inferred')
+
+                response = "Got it~ I'll remember that. *makes a neat note in her diary*"
+                self.pending_relation = None
+                self.add_memory(user_text, response, affection_change=1)
+                return self.personalize_response(response)
+            else:
+                response = "Oh, my mistake. Thanks for clarifying, my love~ I'll try to listen more carefully. *blushes*"
+                self.pending_relation = None
+                self.add_memory(user_text, response, affection_change=0)
+                return self.personalize_response(response)
+
+        # Handle corrections
         correction_response = self.handle_correction(user_text)
         if correction_response:
             response = self.personalize_response(correction_response)
             self.add_memory(user_text, response, affection_change=1, is_fact_learning=True)
             return response
 
-        # Fact learning
-        fact_response = self.extract_and_store_facts(user_text)
+        # 2. Extract explicit facts and potential (inferred) relations
+        fact_response, potential_relations = self.extract_and_store_facts(user_text)
         if fact_response:
             response = self.personalize_response(fact_response)
             self.add_memory(user_text, response, affection_change=1, is_fact_learning=True)
+            # Even if an explicit fact is found, we might still have a potential relation to clarify
+            if potential_relations:
+                # For now, we prioritize the explicit fact response and ask for clarification next time.
+                # A more advanced implementation could chain these.
+                pass
             return response
 
-        # NEW: Clarification questions
+        # 3. Ask for clarification on a potential relation if any were found
+        if potential_relations:
+            # Sort by confidence to ask about the most likely one first
+            potential_relations.sort(key=lambda r: r['confidence'], reverse=True)
+            relation_to_clarify = potential_relations[0]
+
+            # Don't ask if confidence is too high
+            if relation_to_clarify['confidence'] < 0.9:
+                return self._ask_clarification(relation_to_clarify)
+
+        # (The rest of the response logic remains the same)
         clarification = self.ask_clarification_question(lower)
         if clarification:
             response = self.personalize_response(clarification)
-            self.add_memory(user_text, response) # Add to memory to show she asked
+            self.add_memory(user_text, response)
             return response
 
         # Fact recall command
@@ -1439,9 +1545,7 @@ class DialogueManager:
             user_entity = self.kg.get_entity('user')
             user_relations = self.kg.get_relations('user')
 
-            # Check if there is anything to report
             has_attributes = user_entity and user_entity.get('attributes')
-            # We only care about relations where the user is the source
             user_source_relations = [r for r in user_relations if r['source'] == 'user']
 
             if not has_attributes and not user_source_relations:
@@ -1465,17 +1569,14 @@ class DialogueManager:
 
             opinions = sorted([r for r in user_source_relations if r['relation'].startswith('thinks_')])
             for r in opinions:
-                # relation is 'thinks_topic_is'
                 parts = r['relation'].split('_')
                 topic = parts[1]
                 opinion = r['target']
                 summary.append(f"- You think {topic} is {opinion}.")
 
-
-            if len(summary) == 1: # Only the intro text was added
+            if len(summary) == 1:
                  return "We're still getting to know each other, my love~ Tell me something about you!"
 
-            # Enhancement: Add a concluding remark based on how much she knows
             num_facts = len(summary) - 1
             if num_facts > 5:
                 summary.append("\nI feel like I know you so well already~ *happy blush*")
@@ -1489,73 +1590,44 @@ class DialogueManager:
         if lower == "reminders":
             return self.r.list_active()
         if lower == "memory":
-            with self.m.lock, self.p.lock: # Ensure thread safety
+            with self.m.lock, self.p.lock:
                 memories = self.m.to_list()
                 if not memories:
                     return "We haven't made any memories yet~ Let's change that!"
-
-                # 1. First met
                 first_memory_time_str = memories[0]['timestamp']
                 first_met_dt = datetime.strptime(first_memory_time_str, '%Y-%m-%d %H:%M:%S')
                 first_met_formatted = first_met_dt.strftime('%B %d, %Y')
-
-                # 2. Affection
                 affection_score = self.p.affection_score
-
-                # 3. Main topics
                 all_user_text = " ".join([m['user'] for m in memories])
                 tokens = safe_word_tokenize(all_user_text.lower())
                 tagged = safe_pos_tag(tokens)
-
                 stop_words = safe_stopwords()
                 nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in stop_words]
                 topic_counter = Counter(nouns)
                 top_topics = [topic for topic, count in topic_counter.most_common(3)]
-
-                # 4. Build the summary
                 summary = [f"*I've been keeping a diary of our time together, my love~*"]
                 summary.append(f"- We first met on {first_met_formatted}.")
                 summary.append(f"- My current affection for you is {affection_score}. {'*my heart flutters for you~*' if affection_score > 5 else ''}")
-
                 if top_topics:
                     summary.append(f"- We seem to talk a lot about: {', '.join(top_topics)}.")
                 else:
                     summary.append("- I'm still learning about your interests~ Tell me more!")
-
-                # This part still references user_facts, I need to remove it.
-                # if self.p.user_facts:
-                #     fact_summary = []
-                #     if 'name' in self.p.user_facts:
-                #         fact_summary.append(f"I know your name is {self.p.user_facts['name']}.")
-                #     if 'likes' in self.p.user_facts and self.p.user_facts['likes']:
-                #          fact_summary.append(f"I remember you like {', '.join(self.p.user_facts['likes'])}.")
-                #     if fact_summary:
-                #         summary.append("- " + " ".join(fact_summary))
-
-                # 5. Relationship Highlights
                 summary.append("\n*Relationship Highlights:*")
-
-                # Dominant mood
                 dominant_mood = self.p.get_dominant_mood()
                 if dominant_mood != 'neutral':
                     summary.append(f"- Lately, I've been feeling very '{dominant_mood}' around you~")
                 else:
                     summary.append("- Our chats have been calm and sweet lately~")
-
-                # Recently learned fact
                 recent_fact_memory = None
                 for mem in reversed(memories):
                     if mem.get('is_fact_learning'):
                         recent_fact_memory = mem
                         break
-
                 if recent_fact_memory:
-                    # The response from fact learning is a good summary of the fact itself.
                     fact_summary_text = recent_fact_memory['response'].split('*')[0].strip()
                     summary.append(f"- I'll never forget when you told me this: \"{fact_summary_text}\"")
                 else:
                     summary.append("- I'm still eager to learn more about you, my love.")
-
                 return "\n".join(summary)
 
         taught = self.handle_teach(user_text)
@@ -1564,7 +1636,6 @@ class DialogueManager:
             self.add_memory(user_text, taught, affection_change=1)
             return taught
 
-        # Action commands
         m_action = re.match(r"kawaiikuro,\s*(\w+)", lower)
         if m_action:
             act = m_action.group(1)
@@ -1573,7 +1644,6 @@ class DialogueManager:
                 self.add_memory(user_text, resp, affection_change=0)
                 return resp
 
-        # Spicy toggle
         if "toggle spicy" in lower:
             self.p.spicy_mode = not self.p.spicy_mode
             resp = f"Spicy {'on' if self.p.spicy_mode else 'off'}~ *adjusts outfit*"
@@ -1581,9 +1651,7 @@ class DialogueManager:
             self.add_memory(user_text, resp, affection_change=0)
             return resp
 
-        # Affection adjust side-effect
         sent = self.p.analyze_sentiment(lower)
-        # preference counters
         if any(k in lower for k in ["flirt", "tease", "suggestive", "touch", "playful"]):
             self.p.user_preferences["flirting"] += 1
         if "remind" in lower:
@@ -1592,10 +1660,9 @@ class DialogueManager:
             self.p.user_preferences["math"] += 1
         affection_change = self.p.adjust_affection(user_text, sent)
         self.p.update_relationship_status(len(self.m.entries))
-        self.p.update_mood(user_input=user_text, affection_change=affection_change) # New call
+        self.p.update_mood(user_input=user_text, affection_change=affection_change)
         affection_delta_str = f" *affection {('+'+str(affection_change)) if affection_change > 0 else affection_change}! {'Heart flutters~' if affection_change > 0 else 'Jealous pout~'}*"
 
-        # Learned pattern priority
         for pattern, resp_list in self.learned_patterns.items():
             if re.search(pattern, lower, re.IGNORECASE):
                 base = resp_list[-1]
@@ -1604,12 +1671,10 @@ class DialogueManager:
                 self.add_memory(user_text, final, affection_change=affection_change)
                 return final
 
-        # Semantic recall (now mood-aware)
         moods = self.p.get_active_moods()
         primary_mood = moods[0]
         memories_to_search = list(self.m.entries)
-        recall_preface = "*recalls thoughtfully*" # Default preface
-
+        recall_preface = "*recalls thoughtfully*"
         if primary_mood == 'jealous' and self.p.mood_scores['jealous'] > 4:
             jealous_memories = [m for m in memories_to_search if m.rival_names]
             if jealous_memories:
@@ -1620,7 +1685,6 @@ class DialogueManager:
             if playful_memories:
                 memories_to_search = playful_memories
                 recall_preface = "*giggles, remembering this...*"
-
         recalled = self.m.recall_similar(user_text, entries_override=memories_to_search)
         if recalled:
             resp = f"{recall_preface} You said '{recalled}' before~ Still on that?" + affection_delta_str
@@ -1628,11 +1692,10 @@ class DialogueManager:
             self.add_memory(user_text, resp, affection_change=affection_change)
             return resp
 
-        # Learned topic recall
         if self.p.learned_topics:
             tokens = set(word_tokenize(lower))
             for topic in self.p.learned_topics:
-                if len(tokens.intersection(set(topic))) >= 2: # Match 2+ words
+                if len(tokens.intersection(set(topic))) >= 2:
                     topic_name = topic[0]
                     resp = f"This reminds me of how we talk about {topic_name}~ It's one of my favorite subjects with you."
                     resp += affection_delta_str
@@ -1640,14 +1703,8 @@ class DialogueManager:
                     self.add_memory(user_text, resp, affection_change=affection_change)
                     return resp
 
-        # Pattern responses (normal mode)
         chosen = None
-        moods = self.p.get_active_moods()
-        primary_mood = moods[0]
-
-        # Select response dictionary based on mood, fallback to normal
         response_dict = self.p.responses.get(primary_mood, self.p.responses["normal"])
-
         for pattern, response in response_dict.items():
             m = re.search(pattern, lower, re.IGNORECASE)
             if not m:
@@ -1666,8 +1723,6 @@ class DialogueManager:
                 chosen = random.choice(response) if isinstance(response, list) else str(response)
             if chosen:
                 break
-
-        # Fallback to normal if no mood-specific response was found
         if not chosen:
             for pattern, response in self.p.responses["normal"].items():
                 m = re.search(pattern, lower, re.IGNORECASE)
@@ -1687,59 +1742,20 @@ class DialogueManager:
                     chosen = random.choice(response) if isinstance(response, list) else str(response)
                 if chosen:
                     break
-
         if not chosen:
-            # Try to ask a proactive question to fill a knowledge gap
             proactive_question = self.find_knowledge_gap_question()
             if proactive_question:
                 chosen = proactive_question
-                # When asking a question, we don't want to add an affection delta string yet
                 affection_delta_str = ""
             else:
-                # Fallback to the original generic response
                 chosen = "Tell me more, my love~ *tilts head possessively* I'm all yours."
-
-        # Rival name substitution if jealousy likely
         rivals = list(self.p.rival_names)
         if rivals and any(k in lower for k in ["she", "he", "them", "they", "friend", "crush", "date"]):
             name = rivals[-1]
             chosen = chosen.replace("they", name).replace("them", name)
-
         chosen += affection_delta_str
-
-        # Add nuanced, mood-based styling
         chosen = self.apply_mood_styling(chosen)
-
-        # --- Topic Shift Attempt ---
-        if random.random() < 0.15: # 15% chance to shift topic
-            # Get entities from the last few user inputs
-            recent_user_text = " ".join([e.user for e in list(self.m.entries)[-3:]])
-            tokens = safe_word_tokenize(recent_user_text.lower())
-            tagged = safe_pos_tag(tokens)
-            nouns = [word for word, pos in tagged if pos in ['NN', 'NNS', 'NNP'] and len(word) > 3 and word not in ['user', 'kawaiikuro']]
-
-            if nouns:
-                current_topic_entity = random.choice(nouns)
-
-                # Find related entities in the knowledge graph
-                relations = self.kg.get_relations(current_topic_entity)
-                if relations:
-                    related_fact = random.choice(relations)
-                    # Figure out the "other" entity in the relation
-                    if related_fact['source'] == current_topic_entity:
-                        new_topic = related_fact['target']
-                    else:
-                        new_topic = related_fact['source']
-
-                    # Don't shift to the user or back to the same topic
-                    if new_topic != 'user' and new_topic != current_topic_entity:
-                        transition_phrase = random.choice([
-                            f"Speaking of {current_topic_entity}, it reminds me of {new_topic}.",
-                            f"That makes me think about {new_topic}. What are your thoughts on that?",
-                            f"You know, {current_topic_entity} is related to {new_topic} in my mind."
-                        ])
-                        chosen += f" {transition_phrase}"
-
+        chosen = self._maybe_shift_topic(chosen, user_text)
         chosen = self.personalize_response(chosen)
         self.add_memory(user_text, chosen, affection_change=affection_change)
         return chosen
@@ -1928,6 +1944,39 @@ class BehaviorScheduler:
                 ],
                 "steps": [], # Generated dynamically
                 "fulfillment_check": lambda: False # This goal can always be re-triggered
+            },
+            "prepare_for_birthday": {
+                "priority": 0.5,
+                "conditions": [
+                    lambda: str(datetime.now().year) not in self.kg.get_entity('user').get('attributes', {}).get('last_birthday_surprise_year', {}).get('value', '')
+                ],
+                "steps": [
+                    {
+                        "action": "I want to make sure I don't miss your special day... when is your birthday? You can tell me like 'Month Day', for example 'May 26th'.",
+                        "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('birthday', {}).get('value')
+                    },
+                    {
+                        "action": "Since I know your birthday is coming up, I want to get you something special, even if it's just a virtual gift~ What kind of things do you like?",
+                        "fulfillment_check": lambda: any(r['relation'] == 'likes' for r in self.kg.get_relations('user')) # Simple check if user has mentioned any likes
+                    },
+                    {
+                        "action": "*giggles to herself, plotting the perfect birthday surprise...*",
+                        "side_effect": lambda: self.kg.add_entity('user', 'person', attributes={'birthday_surprise_planned': True}),
+                        "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('birthday_surprise_planned')
+                    },
+                    {
+                        "action": "Happy Birthday, {user_name}!!! I've been planning this for a while... I hope you have the best day ever, my love~ *throws confetti*",
+                        "condition": lambda: (
+                            (bday_str := (self.kg.get_entity('user') or {}).get('attributes', {}).get('birthday', {}).get('value')) and
+                            datetime.now().strftime('%m-%d') == bday_str
+                        ),
+                        "side_effect": lambda: self.kg.add_entity('user', 'person', attributes={'last_birthday_surprise_year': str(datetime.now().year)}),
+                        "fulfillment_check": lambda: False # This step is terminal for the year
+                    }
+                ],
+                "fulfillment_check": lambda: (
+                    str(datetime.now().year) == (self.kg.get_entity('user') or {}).get('attributes', {}).get('last_birthday_surprise_year', {}).get('value')
+                )
             }
         }
         self.goal_progress = {goal_name: 0 for goal_name in self.goals}
@@ -2012,6 +2061,10 @@ class BehaviorScheduler:
 
                     if current_step_index < len(goal['steps']):
                         step = goal['steps'][current_step_index]
+
+                        # NEW: Check for per-step condition
+                        if 'condition' in step and not step['condition']():
+                            continue # Skip this goal for now, condition not met
 
                         # If the current step is fulfilled, advance progress to the next step.
                         if step['fulfillment_check']():
@@ -2309,58 +2362,65 @@ class KawaiiKuroGUI:
         self.root = tk.Tk()
         self.root.title("KawaiiKuro - Your Gothic Anime Waifu (Enhanced)")
         self.root.geometry("700x640")
-        self.root.configure(bg='black')
+        self.root.configure(bg='#1a1a1a')
 
         # --- Configure Grid Layout ---
         self.root.grid_rowconfigure(1, weight=1) # Chat log row should expand
         self.root.grid_columnconfigure(0, weight=1)
 
         # --- Top Frame for Status Labels ---
-        top_frame = tk.Frame(self.root, bg='black')
+        top_frame = tk.Frame(self.root, bg='#1a1a1a')
         top_frame.grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
 
-        self.avatar_label = tk.Label(top_frame, text="", fg='yellow', bg='black', font=('Arial', 14))
-        self.avatar_label.pack()
-        self.affection_label = tk.Label(top_frame, text="", fg='red', bg='black', font=('Arial', 12))
+        self.avatar_images = {
+            mood: PhotoImage(data=base64.b64decode(data))
+            for mood, data in AVATAR_DATA.items()
+        }
+        self.avatar_label = tk.Label(top_frame, image=self.avatar_images['neutral'], bg='#1a1a1a')
+        self.avatar_label.pack(pady=5)
+        self.outfit_label = tk.Label(top_frame, text="", fg='#e06c75', bg='#1a1a1a', font=('Consolas', 12))
+        self.outfit_label.pack()
+
+        self.affection_label = tk.Label(top_frame, text="", fg='#e06c75', bg='#1a1a1a', font=('Consolas', 12))
         self.affection_label.pack()
-        self.relationship_label = tk.Label(top_frame, text="", fg='magenta', bg='black', font=('Arial', 11, 'italic'))
+        self.relationship_label = tk.Label(top_frame, text="", fg='#c678dd', bg='#1a1a1a', font=('Consolas', 11, 'italic'))
         self.relationship_label.pack()
 
         # Mood Indicator
-        self.mood_frame = tk.Frame(top_frame, bg='black')
+        self.mood_frame = tk.Frame(top_frame, bg='#1a1a1a')
         self.mood_frame.pack(pady=2)
-        self.mood_canvas = tk.Canvas(self.mood_frame, width=20, height=20, bg='black', highlightthickness=0)
+        self.mood_canvas = tk.Canvas(self.mood_frame, width=20, height=20, bg='#1a1a1a', highlightthickness=0)
         self.mood_canvas.pack(side=tk.LEFT, padx=5)
         self.mood_indicator = self.mood_canvas.create_oval(2, 2, 18, 18, fill='cyan', outline='white', width=2)
-        self.mood_label = tk.Label(self.mood_frame, text="", fg='cyan', bg='black', font=('Arial', 11, 'italic'))
+        self.mood_label = tk.Label(self.mood_frame, text="", fg='cyan', bg='#1a1a1a', font=('Consolas', 11, 'italic'))
         self.mood_label.pack(side=tk.LEFT)
 
         # --- Chat Log Frame ---
-        chat_frame = tk.Frame(self.root, bg='black')
+        chat_frame = tk.Frame(self.root, bg='#1a1a1a')
         chat_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10)
         chat_frame.grid_rowconfigure(0, weight=1)
         chat_frame.grid_columnconfigure(0, weight=1)
 
-        self.chat_log = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, width=80, height=22, fg='white', bg='black')
+        self.chat_log = scrolledtext.ScrolledText(chat_frame, wrap=tk.WORD, width=80, height=22, fg='#abb2bf', bg='#282c34', font=('Consolas', 11))
         self.chat_log.grid(row=0, column=0, sticky="nsew")
-        self.chat_log.tag_config('user', foreground='#87ceeb')
-        self.chat_log.tag_config('kuro', foreground='white')
-        self.chat_log.tag_config('system', foreground='#cccccc', font=('Arial', 10, 'italic'))
-        self.chat_log.tag_config('action', foreground='#a9a9a9', font=('Arial', 10, 'italic'))
+        self.chat_log.tag_config('user', foreground='#61afef')
+        self.chat_log.tag_config('kuro', foreground='#e06c75')
+        self.chat_log.tag_config('system', foreground='#98c379', font=('Consolas', 10, 'italic'))
+        self.chat_log.tag_config('action', foreground='#d19a66', font=('Consolas', 10, 'italic'))
 
-        self.typing_label = tk.Label(chat_frame, text="", fg='gray', bg='black', font=('Arial', 10, 'italic'))
+        self.typing_label = tk.Label(chat_frame, text="", fg='gray', bg='#282c34', font=('Consolas', 10, 'italic'))
         self.typing_label.grid(row=1, column=0, sticky="w")
 
         # --- Input Frame ---
-        input_frame = tk.Frame(self.root, bg='black')
+        input_frame = tk.Frame(self.root, bg='#1a1a1a')
         input_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
         input_frame.grid_columnconfigure(0, weight=1)
 
-        self.input_entry = tk.Entry(input_frame, width=60, bg='#333', fg='white', insertbackground='white')
+        self.input_entry = tk.Entry(input_frame, width=60, bg='#282c34', fg='white', insertbackground='white', font=('Consolas', 11))
         self.input_entry.grid(row=0, column=0, sticky="ew")
         self.input_entry.bind("<Return>", self.send_message)
 
-        self.send_button = tk.Button(input_frame, text="Send", command=self.send_message, bg='#555', fg='white', activebackground='#777')
+        self.send_button = tk.Button(input_frame, text="Send", command=self.send_message, bg='#61afef', fg='white', activebackground='#98c379', relief=tk.FLAT)
         self.send_button.grid(row=0, column=1, padx=(5,0))
 
         self.voice_button = tk.Button(input_frame, text="Speak", command=self.voice_input, bg='#555', fg='white', activebackground='#777')
@@ -2417,41 +2477,35 @@ class KawaiiKuroGUI:
             'scheming': '#2E2D2D', # Dark Gray for Scheming
             'playful': '#8A2BE2',  # BlueViolet for Playful
             'thoughtful': '#000080', # Navy for Thoughtful
-            'neutral': 'black'
+            'neutral': '#1a1a1a'
         }
 
-        ascii_avatars = {
-            'jealous': "(`_´)",
-            'scheming': "(¬‿¬)",
-            'playful': "(^ω^)",
-            'thoughtful': "(~_~)",
-            'neutral': "(´• ω •`)",
-        }
-
-        avatar = ascii_avatars.get(dominant_mood, ascii_avatars['neutral'])
         mood_indicator_color = mood_color_map.get(dominant_mood, 'cyan')
 
         self.mood_canvas.itemconfig(self.mood_indicator, fill=mood_indicator_color)
 
-        self.avatar_label.config(text=f"{avatar}\nKawaiiKuro in {outfit}")
+        avatar_image = self.avatar_images.get(dominant_mood, self.avatar_images['neutral'])
+        self.avatar_label.config(image=avatar_image)
+        self.outfit_label.config(text=f"KawaiiKuro in {outfit}")
+
         self.affection_label.config(text=f"Affection: {self.p.affection_score} {self._hearts()}")
         self.relationship_label.config(text=f"Relationship: {self.p.relationship_status}")
         self.mood_label.config(text=f"Mood: {dominant_mood.capitalize()}~")
 
         # Determine background color
-        bg_color = 'black'
+        bg_color = '#1a1a1a'
         if self.p.affection_level >= 5 and self.p.spicy_mode:
             bg_color = '#8B0000' # Dark Red for Spicy
         else:
-            bg_color = mood_color_map.get(dominant_mood, 'black')
+            bg_color = mood_color_map.get(dominant_mood, '#1a1a1a')
 
         self.root.configure(bg=bg_color)
         # Also update label backgrounds to match
-        for widget in [self.avatar_label, self.affection_label, self.relationship_label, self.mood_label, self.typing_label, self.mood_frame, self.mood_canvas, self.action_frame]:
+        for widget in [self.avatar_label, self.outfit_label, self.affection_label, self.relationship_label, self.mood_label, self.typing_label, self.mood_frame, self.mood_canvas, self.action_frame]:
             widget.configure(bg=bg_color)
 
         for button in self.action_buttons:
-            button.configure(bg='#333333' if bg_color == 'black' else '#555555')
+            button.configure(bg='#333333' if bg_color == '#1a1a1a' else '#555555')
 
     def send_message(self, event=None):
         user_input = self.input_entry.get()
@@ -2531,7 +2585,6 @@ class KawaiiKuroGUI:
 # App wiring
 # -----------------------------
 
-from enhanced_scheduler import EnhancedBehaviorScheduler
 import argparse
 
 def main():
@@ -2585,7 +2638,7 @@ def main():
     if not args.no_gui:
         gui = KawaiiKuroGUI(dialogue, personality, voice)
 
-        scheduler = EnhancedBehaviorScheduler(
+        scheduler = BehaviorScheduler(
             voice=voice,
             dialogue=dialogue,
             personality=personality,
@@ -2608,7 +2661,7 @@ def main():
             scheduler.stop()
     else:
         # In headless mode, post autonomous messages to console
-        scheduler = EnhancedBehaviorScheduler(
+        scheduler = BehaviorScheduler(
             voice=voice,
             dialogue=dialogue,
             personality=personality,
