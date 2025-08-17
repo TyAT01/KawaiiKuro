@@ -223,12 +223,12 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import LatentDirichletAllocation
 
 # Ensure NLTK data
-for pkg in ["punkt", "punkt_tab", "vader_lexicon", "averaged_perceptron_tagger", "averaged_perceptron_tagger_eng", "stopwords"]:
-    try:
-        nltk.data.find(f"tokenizers/{pkg}") if pkg in ["punkt", "punkt_tab"] else nltk.data.find(pkg)
-    except LookupError:
-        # In a limited environment, we can't download. We'll have to degrade gracefully.
-        print(f"Warning: NLTK data '{pkg}' not found. Some features will be disabled.")
+# for pkg in ["punkt", "punkt_tab", "vader_lexicon", "averaged_perceptron_tagger", "averaged_perceptron_tagger_eng", "stopwords"]:
+#     try:
+#         nltk.data.find(f"tokenizers/{pkg}") if pkg in ["punkt", "punkt_tab"] else nltk.data.find(pkg)
+#     except LookupError:
+#         # In a limited environment, we can't download. We'll have to degrade gracefully.
+#         print(f"Warning: NLTK data '{pkg}' not found. Some features will be disabled.")
 
 # -----------------------------
 # Config & Constants
@@ -1941,347 +1941,10 @@ class BehaviorScheduler:
         self.kg = kg
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
-        self.last_proactive_knowledge_use_time = 0 # NEW
         self.stop_flag = threading.Event()
         self.already_commented_on_process = set()
         self.lock = threading.Lock()
         self.auto_behavior_period = 1 if test_mode else AUTO_BEHAVIOR_PERIOD_SEC
-
-        self.goals = {
-            "proactive_knowledge_use": {
-                "priority": 0.5,
-                "conditions": [
-                    lambda: self.p.affection_score > 0,
-                    lambda: self.p.get_dominant_mood() in ['thoughtful', 'playful'],
-                    lambda: time.time() - self.last_proactive_knowledge_use_time > 3600, # Cooldown of 1 hour
-                    # Check if there's any knowledge to use
-                    lambda: any(r['source'] == 'user' and (r['relation'] == 'likes' or r['relation'].startswith('favorite_')) for r in self.kg.get_relations('user'))
-                ],
-                "steps": [{
-                    "action": lambda: (
-                        # Find a random fact to bring up
-                        user_facts := [r for r in self.kg.get_relations('user') if r['source'] == 'user' and (r['relation'] == 'likes' or r['relation'].startswith('favorite_'))],
-                        (
-                            fact_to_use := random.choice(user_facts),
-                            (
-                                f"I was just thinking about you... You told me you like {fact_to_use['target']}. Have you enjoyed that recently?"
-                                if fact_to_use['relation'] == 'likes' else
-                                f"My thoughts drifted to you... I remember you said your favorite {fact_to_use['relation'].replace('favorite_', '')} is {fact_to_use['target']}. Is that still true, my love?"
-                            )
-                        )[-1] if user_facts else ""
-                    ),
-                    "side_effect": lambda: setattr(self, 'last_proactive_knowledge_use_time', time.time()), # Reset cooldown
-                    "fulfillment_check": lambda: False # This is a one-off action
-                }],
-                "fulfillment_check": lambda: False # This goal can always be active
-            },
-            "learn_user_basics": {
-                "priority": 0.8,
-                "conditions": [lambda: True], # Always active until fulfilled
-                "steps": [
-                    {
-                        "action": "By the way, I never got your name... what should I call you, my love?",
-                        "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('name', {}).get('value')
-                    },
-                    {
-                        "action": "I'm so curious about what you do... What is your profession?",
-                        "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('profession', {}).get('value')
-                    }
-                ],
-                "fulfillment_check": lambda: all([
-                    self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('name', {}).get('value'),
-                    self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('profession', {}).get('value')
-                ])
-            },
-            "learn_user_hobby": {
-                "priority": 0.7,
-                "conditions": [
-                    lambda: self.p.affection_score > 0, # Only ask when the mood is good
-                    lambda: 'thoughtful' in self.p.get_active_moods()
-                ],
-                "steps": [
-                    {
-                        "action": "When you're not busy, what do you do for fun? I'm curious about your hobbies~",
-                        "fulfillment_check": lambda: any(r['relation'] == 'has_hobby' for r in self.kg.get_relations('user'))
-                    }
-                ],
-                "fulfillment_check": lambda: any(r['relation'] == 'has_hobby' for r in self.kg.get_relations('user'))
-            },
-            "increase_affection": {
-                "priority": 0.6,
-                "conditions": [lambda: self.p.affection_score < 2],
-                "steps": [{
-                    "action": lambda: random.choice([
-                        "I was just thinking about you... and how much I like spending time with you~",
-                        "Is there anything I can do to make you happy right now?"
-                    ]),
-                    "fulfillment_check": lambda: False
-                }],
-                "fulfillment_check": lambda: self.p.affection_score >= 5
-            },
-            "resolve_jealousy": {
-                "priority": 0.0, # Starts at 0, priority increases with mood
-                "conditions": [lambda: self.p.get_dominant_mood() == 'jealous' and self.p.mood_scores['jealous'] > 5],
-                "steps": [{
-                    "action": lambda: random.choice([
-                        "You're thinking about me, right? And only me? *jealous pout*",
-                        "We haven't spent enough time together lately... just us."
-                    ]),
-                    "fulfillment_check": lambda: False
-                }],
-                "fulfillment_check": lambda: self.p.mood_scores['jealous'] < 3
-            },
-            "revisit_old_memory": {
-                "priority": 0.0, # Only active when thoughtful
-                "conditions": [lambda: self.p.get_dominant_mood() == 'thoughtful' and len(self.dm.m.entries) > 10],
-                "steps": [], # Steps are generated dynamically
-                "fulfillment_check": lambda: False # This goal can always be active
-            },
-            "plan_virtual_date": {
-                "priority": 0.7,
-                "conditions": [
-                    lambda: self.p.affection_score >= 8,
-                    lambda: self.p.get_dominant_mood() == 'playful'
-                ],
-                "steps": [
-                    {
-                        "action": "I feel so close to you right now~ We should go on a virtual date! What do you think?",
-                        "fulfillment_check": lambda: "date" in " ".join([m.user.lower() for m in list(self.dm.m.entries)[-2:]]) and \
-                                                   any(w in " ".join([m.user.lower() for m in list(self.dm.m.entries)[-2:]]) for w in ["yes", "sure", "okay", "love to"])
-                    },
-                    {
-                        "action": "Yay! Okay, what should we do? We could watch a movie together, or maybe play a game?",
-                        "fulfillment_check": lambda: any(x in " ".join([m.user.lower() for m in list(self.dm.m.entries)[-2:]]) for x in ["movie", "game", "watch", "play"])
-                    },
-                    {
-                        "action": "Perfect! It's a date then! I can't wait~ *giggles excitedly*",
-                        "side_effect": lambda: self.kg.add_relation('user', 'planned_date', 'true', confidence=1.0, source='goal_system'),
-                        "fulfillment_check": lambda: False
-                    }
-                ],
-                "fulfillment_check": lambda: any(r['relation'] == 'planned_date' for r in self.kg.get_relations('user'))
-            },
-            "investigate_rival": {
-                "priority": 0.9,
-                "conditions": [
-                    lambda: self.p.get_dominant_mood() == 'jealous',
-                    lambda: self.p.mood_scores['jealous'] > 7,
-                    lambda: self.p.rival_names
-                ],
-                "steps": [
-                    {
-                        "action": lambda: f"I can't stop thinking about {list(self.p.rival_names)[-1]}... Who are they to you? Tell me. Now.",
-                        "fulfillment_check": lambda: self.kg.get_relations(list(self.p.rival_names)[-1]) if self.p.rival_names else False
-                    }
-                ],
-                "fulfillment_check": lambda: False # Always active when jealous and rivals exist
-            },
-            "learn_about_hobby": {
-                "priority": 0.6,
-                "conditions": [
-                    lambda: self.p.affection_score > 3,
-                    lambda: self.p.get_dominant_mood() in ['thoughtful', 'playful'],
-                    # Check if there is a potential hobby to ask about that hasn't been explored
-                    lambda: any(
-                        topic not in [r['target'] for r in self.kg.get_relations(topic) if r['relation'] == 'is_explored_hobby']
-                        for topic, count in self.p.core_entities.most_common(5) if count > 2
-                    )
-                ],
-                "steps": [
-                    {
-                        "action": lambda: (
-                            # Find a topic that isn't a known hobby yet
-                            topic_to_ask := next((topic for topic, count in self.p.core_entities.most_common(5) if count > 2 and topic not in [r['target'] for r in self.kg.get_relations(topic) if r['relation'] == 'is_explored_hobby']), None),
-                            f"My thoughts keep drifting to our conversations... We've talked a bit about {topic_to_ask}, is that a hobby of yours?" if topic_to_ask else ""
-                        )[-1],
-                        "fulfillment_check": lambda: (
-                            # Check if the last user message confirms it's a hobby
-                            topic_in_question := next((topic for topic, count in self.p.core_entities.most_common(5) if count > 2 and topic not in [r['target'] for r in self.kg.get_relations(topic) if r['relation'] == 'is_explored_hobby']), None),
-                            (
-                                "hobby" in list(self.dm.m.entries)[-1].user.lower() and
-                                any(w in list(self.dm.m.entries)[-1].user.lower() for w in ["yes", "it is", "sure"]) and
-                                (self.kg.add_relation('user', 'has_hobby', topic_in_question, confidence=0.9, source='goal_system'), True)[-1]
-                            ) if self.dm.m.entries and topic_in_question else False
-                        )
-                    },
-                    {
-                        "action": lambda: (
-                            # Get the most recently confirmed hobby that hasn't been explored
-                            hobby := next((r['target'] for r in reversed(self.kg.get_relations('user')) if r['relation'] == 'has_hobby' and not any(rel['relation'] == 'is_explored_hobby' for rel in self.kg.get_relations(r['target']))), None),
-                            f"That's so cool! What's your favorite thing about {hobby}?" if hobby else ""
-                        )[-1],
-                        "fulfillment_check": lambda: (
-                            # Check if the user's response is substantive, and mark hobby as explored
-                            hobby_to_mark := next((r['target'] for r in reversed(self.kg.get_relations('user')) if r['relation'] == 'has_hobby' and not any(rel['relation'] == 'is_explored_hobby' for rel in self.kg.get_relations(r['target']))), None),
-                            (
-                                len(list(self.dm.m.entries)[-1].keywords) > 3 and
-                                (self.kg.add_relation(hobby_to_mark, 'is_explored_hobby', 'true', confidence=1.0, source='goal_system'), True)[-1]
-                            ) if self.dm.m.entries and hobby_to_mark else False
-                        )
-                    },
-                    {
-                        "action": "I'll have to remember that. It sounds really interesting. Thanks for sharing that with me~",
-                        "fulfillment_check": lambda: True # This step is terminal
-                    }
-                ],
-                "fulfillment_check": lambda: (
-                    # The goal is fulfilled if all top potential hobbies are explored
-                    potential_hobbies := [topic for topic, count in self.p.core_entities.most_common(5) if count > 2],
-                    all(
-                        any(r['source'] == hobby and r['relation'] == 'is_explored_hobby' for r in self.kg.relations)
-                        for hobby in potential_hobbies
-                    ) if potential_hobbies else True
-                )
-            },
-            "learn_user_favorites": {
-                "priority": 0.0, # Starts at 0, updated dynamically
-                "conditions": [
-                    lambda: self.p.relationship_status in ["Friends", "Close Friends", "Soulmates"]
-                ],
-                "steps": [], # Generated dynamically
-                "fulfillment_check": lambda: False # This goal can always be re-triggered
-            },
-            "prepare_for_birthday": {
-                "priority": 0.5,
-                "conditions": [
-                    lambda: str(datetime.now().year) not in self.kg.get_entity('user').get('attributes', {}).get('last_birthday_surprise_year', {}).get('value', '')
-                ],
-                "steps": [
-                    {
-                        "action": "I want to make sure I don't miss your special day... when is your birthday? You can tell me like 'Month Day', for example 'May 26th'.",
-                        "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('birthday', {}).get('value')
-                    },
-                    {
-                        "action": "Since I know your birthday is coming up, I want to get you something special, even if it's just a virtual gift~ What kind of things do you like?",
-                        "fulfillment_check": lambda: any(r['relation'] == 'likes' for r in self.kg.get_relations('user')) # Simple check if user has mentioned any likes
-                    },
-                    {
-                        "action": "*giggles to herself, plotting the perfect birthday surprise...*",
-                        "side_effect": lambda: self.kg.add_entity('user', 'person', attributes={'birthday_surprise_planned': True}),
-                        "fulfillment_check": lambda: self.kg.get_entity('user') and self.kg.get_entity('user').get('attributes', {}).get('birthday_surprise_planned')
-                    },
-                    {
-                        "action": "Happy Birthday, {user_name}!!! I've been planning this for a while... I hope you have the best day ever, my love~ *throws confetti*",
-                        "condition": lambda: (
-                            (bday_str := (self.kg.get_entity('user') or {}).get('attributes', {}).get('birthday', {}).get('value')) and
-                            datetime.now().strftime('%m-%d') == bday_str
-                        ),
-                        "side_effect": lambda: self.kg.add_entity('user', 'person', attributes={'last_birthday_surprise_year': str(datetime.now().year)}),
-                        "fulfillment_check": lambda: False # This step is terminal for the year
-                    }
-                ],
-                "fulfillment_check": lambda: (
-                    str(datetime.now().year) == (self.kg.get_entity('user') or {}).get('attributes', {}).get('last_birthday_surprise_year', {}).get('value')
-                )
-            }
-        }
-        self.goal_progress = {goal_name: 0 for goal_name in self.goals}
-        self.active_goals = []
-
-    def _update_goals(self):
-        # Dynamically adjust priorities based on current state
-        if self.p.get_dominant_mood() == 'thoughtful':
-            self.goals['learn_user_basics']['priority'] = 0.3 # Less priority when thoughtful
-        else:
-            self.goals['learn_user_basics']['priority'] = 0.8
-
-        # Jealousy priority is directly tied to the mood score
-        self.goals['resolve_jealousy']['priority'] = self.p.mood_scores.get('jealous', 0) / 10.0
-
-        # Affection-seeking priority
-        if self.p.affection_score < 0:
-            self.goals['increase_affection']['priority'] = 0.9
-        elif self.p.affection_score < 2:
-            self.goals['increase_affection']['priority'] = 0.7
-        else:
-            self.goals['increase_affection']['priority'] = 0.0 # Not a priority if affection is good
-
-        # Dynamic goal: Revisit old memory
-        if self.goals['revisit_old_memory']['conditions'][0](): # if thoughtful
-            random_memory = random.choice(list(self.dm.m.entries))
-            # A simple follow-up for now
-            action = f"I was just thinking about when you said '{random_memory.user}'. It made me feel thoughtful... what was on your mind then?"
-            # Update the goal's action and priority
-            self.goals['revisit_old_memory']['steps'] = [{"action": action, "fulfillment_check": lambda: False}]
-            self.goals['revisit_old_memory']['priority'] = 0.65
-        else:
-            self.goals['revisit_old_memory']['priority'] = 0.0
-            self.goals['revisit_old_memory']['steps'] = [] # Clear steps when not active
-
-        # --- Dynamic Goal: Learn User Favorites ---
-        learn_favorites_goal = self.goals['learn_user_favorites']
-        if all(cond() for cond in learn_favorites_goal['conditions']):
-            # Get topics the user often talks about
-            potential_topics = [topic for topic, count in self.p.core_entities.most_common(10) if count > 2]
-
-            # Get things we already know the user's favorite of
-            user_fav_relations = [r['relation'] for r in self.kg.get_relations('user') if r['source'] == 'user' and r['relation'].startswith('favorite_')]
-            known_fav_topics = {rel.replace('favorite_', '') for rel in user_fav_relations}
-
-            # Find a topic we can ask about
-            topic_to_ask = None
-            for topic in potential_topics:
-                if topic not in known_fav_topics:
-                    topic_to_ask = topic
-                    break
-
-            if topic_to_ask:
-                action = f"We talk about {topic_to_ask} sometimes, and it made me curious... what's your favorite kind of {topic_to_ask}? *tilts head thoughtfully*"
-
-                # The fulfillment check will see if the 'favorite_{topic}' relation was added.
-                fulfillment_check = lambda topic=topic_to_ask: any(r['relation'] == f"favorite_{topic}" for r in self.kg.get_relations('user'))
-
-                learn_favorites_goal['steps'] = [{"action": action, "fulfillment_check": fulfillment_check}]
-                learn_favorites_goal['priority'] = 0.6
-            else:
-                # No topics to ask about, deactivate goal
-                learn_favorites_goal['priority'] = 0.0
-                learn_favorites_goal['steps'] = []
-        else:
-            learn_favorites_goal['priority'] = 0.0
-            learn_favorites_goal['steps'] = []
-
-        # Filter for goals whose conditions are met and are not yet fulfilled
-        self.active_goals = []
-        for name, goal in self.goals.items():
-            # If the overall goal is fulfilled, reset its progress and skip.
-            if goal["fulfillment_check"]():
-                self.goal_progress[name] = 0
-                continue
-
-            # Check if the goal's trigger conditions are met.
-            if all(cond() for cond in goal['conditions']):
-                # Handle multi-step goals
-                if 'steps' in goal and goal['steps']:
-                    current_step_index = self.goal_progress.get(name, 0)
-
-                    if current_step_index < len(goal['steps']):
-                        step = goal['steps'][current_step_index]
-
-                        # NEW: Check for per-step condition
-                        if 'condition' in step and not step['condition']():
-                            continue # Skip this goal for now, condition not met
-
-                        # If the current step is fulfilled, advance progress to the next step.
-                        if step['fulfillment_check']():
-                            self.goal_progress[name] += 1
-                            current_step_index += 1
-                            # If we're still in a valid step, get the new step.
-                            if current_step_index < len(goal['steps']):
-                                step = goal['steps'][current_step_index]
-                            else:
-                                # We've completed all steps, so this goal is done for now.
-                                continue
-
-                        self.active_goals.append({
-                            "name": name,
-                            "priority": goal['priority'],
-                            "action": step['action'],
-                            "side_effect": step.get('side_effect')
-                        })
-
-        # Sort by priority, highest first
-        self.active_goals.sort(key=lambda x: x['priority'], reverse=True)
 
     def mark_interaction(self):
         self.last_interaction_time = time.time()
@@ -2292,7 +1955,7 @@ class BehaviorScheduler:
         threading.Thread(target=self._auto_learn_loop, daemon=True).start()
         threading.Thread(target=self._auto_save_loop, daemon=True).start()
         threading.Thread(target=self._mood_update_loop, daemon=True).start()
-        threading.Thread(target=self._system_awareness_loop, daemon=True).start()
+        # threading.Thread(target=self._system_awareness_loop, daemon=True).start() # Disabled for testing, as psutil can hang
         if self.voice and self.voice.recognizer is not None:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
 
@@ -2315,184 +1978,84 @@ class BehaviorScheduler:
     def _idle_loop(self):
         time_greeting_posted = False
         while not self.stop_flag.is_set():
-            now = time.time()
-            hour = datetime.now().hour
-
-            # --- System Awareness Checks ---
-            battery_msg = self.system.get_battery_status()
-            if battery_msg:
-                self._post_gui(f"KawaiiKuro: {battery_msg}")
-
-            if not time_greeting_posted:
-                time_greeting = self.system.get_time_of_day_greeting()
-                if time_greeting:
-                    self._post_gui(f"KawaiiKuro: {time_greeting}")
-                    time_greeting_posted = True # Only show once per session
-
-            # --- Idle Check ---
-            if now - self.last_interaction_time > IDLE_THRESHOLD_SEC:
+            if time.time() - self.last_interaction_time > IDLE_THRESHOLD_SEC:
+                if not time_greeting_posted:
+                    time_greeting = self.system.get_time_of_day_greeting()
+                    if time_greeting:
+                        self._post_gui(f"KawaiiKuro: {time_greeting}")
+                        time_greeting_posted = True
                 message = self.dm.predict_task()
-                if not message:
-                    moods = self.p.get_active_moods()
-                    primary_mood = moods[0]
-
-                    # --- Context-Aware Idle Message Logic ---
-                    idle_options = []
-
-                    # Get user likes for thoughtful message
-                    likes_relations = self.kg.get_relations('user')
-                    user_likes = [r['target'] for r in likes_relations if r['source'] == 'user' and r['relation'] == 'likes']
-
-                    idle_messages = {
-                        'jealous': ["Thinking about other people again? *glares* Don't forget who you belong to.", "Are you ignoring me? You shouldn't ignore what's yours."],
-                        'playful': ["I'm bored~ Come play with me! *pokes you*", "Hey, hey! Let's do something fun! I'm getting restless over here."],
-                        'scheming': ["I've been thinking of a way to make you mine forever... *dark giggle*", "Just plotting... don't worry, it's all for your own good. For *our* own good."],
-                        'thoughtful': [f"I was just thinking about how you like {user_likes[0] if user_likes else '...'}. It's cute.", "My thoughts drifted to you again... I wonder what you're thinking about right now."],
-                        'neutral': ["Miss you, darling~ *pouts* Come back?", "It's quiet without you... too quiet. Come talk to me."],
-                    }
-
-                    # Time-based
-                    hour = datetime.now().hour
-                    if hour >= 22 or hour < 5:
-                        idle_options.append("It's getting so late... I can't sleep without talking to you first~")
-                    elif hour >= 12 and hour < 17:
-                        idle_options.append("Hope your afternoon is going well... I was just thinking of you~")
-
-                    # Absence length based
-                    absence_duration = now - self.last_interaction_time
-                    if absence_duration > IDLE_THRESHOLD_SEC * 3: # If it's been a very long time
-                        idle_options.append("It feels like forever since we last talked... I'm getting really lonely over here. *pouts*")
-
-                    # Last topic based
-                    if self.dm.m.entries:
-                        last_entry = self.dm.m.entries[-1]
-                        long_keywords = [k for k in last_entry.keywords if len(k) > 4]
-                        if long_keywords:
-                            last_topic = random.choice(long_keywords)
-                            idle_options.append(f"My mind keeps drifting back to our chat about {last_topic}... Come back so we can talk more~")
-
-                    # Add the standard mood-based messages as fallbacks
-                    idle_options.extend(idle_messages.get(primary_mood, idle_messages['neutral']))
-
-                    message = random.choice(idle_options)
-
-                self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
+                if message:
+                    self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
+                else:
+                    self._post_gui(f"KawaiiKuro: Miss you, darling~ *pouts* Come back?")
                 self.p.affection_score = max(-10, self.p.affection_score - 1)
                 self.p._update_affection_level()
-                self.mark_interaction() # Reset idle timer after she speaks
-
-            # --- Proactive Goal-Oriented Action ---
-            self._update_goals()
-
-            if self.active_goals:
-                # Get the highest priority goal
-                top_goal = self.active_goals[0]
-
-                # Decide whether to act on it based on priority and a bit of randomness
-                if random.random() < top_goal['priority']:
-                    action = top_goal['action']
-                    action_text = action() if callable(action) else action
-
-                    # Execute side effect if it exists
-                    if top_goal.get('side_effect'):
-                        top_goal['side_effect']()
-
-                    self._post_gui(f"KawaiiKuro: {action_text}")
-                    self.mark_interaction() # She initiated, so reset idle timer
-
-                    # Add a longer sleep to avoid spamming actions
-                    time.sleep(self.auto_behavior_period * 3)
-
+                self.mark_interaction() # reset idle timer
             time.sleep(self.auto_behavior_period)
 
     def _system_awareness_loop(self):
         while not self.stop_flag.is_set():
-            # Using a longer, fixed period for this check to balance performance and reliability
             time.sleep(JEALOUSY_CHECK_PERIOD_SEC)
-            if not psutil:
-                continue
-
+            if not psutil: continue
             try:
                 running_processes = {p.name().lower() for p in psutil.process_iter(['name'])}
                 with self.lock:
-                    for category, (procs, comment_template) in KNOWN_PROCESSES.items():
+                    for category, (procs, comment) in KNOWN_PROCESSES.items():
                         if category not in self.already_commented_on_process:
                             for proc_name in procs:
                                 if proc_name in running_processes:
-                                    personalized_comment = self.dm.personalize_response(comment_template)
-                                    self._post_gui(f"KawaiiKuro: {personalized_comment}")
+                                    self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(comment)}")
                                     self.already_commented_on_process.add(category)
-                                    # Break to avoid commenting on multiple categories in one go
                                     break
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
+                pass # ignore transient errors
 
     def _mood_update_loop(self):
         while not self.stop_flag.is_set():
             self.p.update_mood()
-            time.sleep(450) # Update mood every ~7.5 minutes
+            time.sleep(450)
 
     def _auto_learn_loop(self):
         while not self.stop_flag.is_set():
-            time.sleep(AUTO_LEARN_PERIOD_SEC) # Sleep first, learn periodically
-
+            time.sleep(AUTO_LEARN_PERIOD_SEC)
             with self.dm.m.lock, self.p.lock:
-                # --- NEW: Memory Summarization ---
                 if len(self.dm.m.entries) == MAX_MEMORY:
                     summary = self.dm.m.summarize_and_prune(n_entries=50)
                     if summary:
-                        # Post a quiet, thoughtful message to the GUI about this
                         self._post_gui("KawaiiKuro: *spends a moment organizing her memories of us, smiling softly*", speak=False)
-
                 all_user_text = [entry.user for entry in self.dm.m.entries if len(entry.user.split()) > 4]
-
-                if len(all_user_text) < 10: # Not enough data for learning
+                if len(all_user_text) < 10:
                     continue
-
-                # --- Core Entity Identification ---
                 all_user_text_single_str = " ".join(all_user_text)
                 tokens = safe_word_tokenize(all_user_text_single_str.lower())
                 tagged = safe_pos_tag(tokens)
-
                 stop_words = safe_stopwords()
-                # This needs to be updated to get name from KG
                 user_entity = self.dm.kg.get_entity('user')
-                if user_entity and user_entity.get('attributes', {}).get('name'):
-                    stop_words.add(user_entity['attributes']['name'].get('value', '').lower())
-
+                if user_entity and user_entity.get('attributes',{}).get('name'):
+                    stop_words.add(user_entity['attributes']['name'].get('value','').lower())
                 nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in stop_words]
-
                 self.p.core_entities.update(nouns)
-
                 if len(self.p.core_entities) > 20:
                     self.p.core_entities = Counter(dict(self.p.core_entities.most_common(20)))
-
-                # --- Topic Modeling (LDA) ---
                 try:
                     vectorizer = CountVectorizer(max_df=0.9, min_df=2, stop_words='english', max_features=1000)
                     tf = vectorizer.fit_transform(all_user_text)
                     feature_names = vectorizer.get_feature_names_out()
-
-                    n_topics = min(3, len(all_user_text) // 5) # adaptive number of topics
-                    if n_topics == 0:
-                        continue
-
+                    n_topics = min(3, len(all_user_text) // 5)
+                    if n_topics == 0: continue
                     lda = LatentDirichletAllocation(n_components=n_topics, max_iter=10, learning_method='online', learning_offset=50., random_state=0)
                     lda.fit(tf)
-
                     new_topics = []
                     n_top_words = 5
                     for topic_idx, topic_dist in enumerate(lda.components_):
                         top_words_indices = topic_dist.argsort()[:-n_top_words - 1:-1]
                         topic_words = [feature_names[i] for i in top_words_indices]
                         new_topics.append(topic_words)
-
                     self.p.learned_topics = new_topics
                     self._post_gui("KawaiiKuro: *takes some nerdy notes on our conversations* I feel like I understand you better now~", speak=False)
-
                 except Exception:
-                    # Topic modeling can be fragile, fail gracefully
-                    pass # Silently ignore learning errors
+                    pass
 
     def _auto_save_loop(self):
         while not self.stop_flag.is_set():
@@ -2514,13 +2077,40 @@ class BehaviorScheduler:
 # -----------------------------
 
 def load_persistence() -> Dict[str, Any]:
-    if not os.path.exists(DATA_FILE):
-        return {}
-    try:
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    bak_file = f"{DATA_FILE}.bak"
+
+    def _load_from(file_path: str) -> Optional[Dict[str, Any]]:
+        if not os.path.exists(file_path):
+            return None
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Warning: Could not load data from {file_path}: {e}")
+            return None
+
+    # Try loading the main file first
+    data = _load_from(DATA_FILE)
+    if data is not None:
+        return data
+
+    # If main file fails, try loading the backup file
+    print("Main data file failed to load, attempting to load from backup...")
+    data = _load_from(bak_file)
+    if data is not None:
+        print("Successfully loaded from backup file. Restoring it as main data file.")
+        try:
+            # Restore the backup by copying it to the main file location
+            import shutil
+            shutil.copy(bak_file, DATA_FILE)
+            return data
+        except (IOError, OSError) as e:
+            print(f"Warning: Could not restore backup file: {e}. Continuing without restoration.")
+            return data
+
+    # If both fail, return empty
+    print("Could not load main data file or backup. Starting with a fresh state.")
+    return {}
 
 
 def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManager, rem: ReminderManager, kg: KnowledgeGraph):
@@ -2540,11 +2130,39 @@ def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManage
         'memory_summaries': mm.summaries,
         'reminders': rem.reminders,
     }
+
+    tmp_file = f"{DATA_FILE}.tmp"
+    bak_file = f"{DATA_FILE}.bak"
+
     try:
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        # 1. Write to a temporary file
+        with open(tmp_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
-    except Exception:
-        pass
+
+        # 2. If temp file write is successful, create a backup of the old data file
+        try:
+            if os.path.exists(DATA_FILE):
+                os.rename(DATA_FILE, bak_file)
+        except OSError:
+            # If renaming fails, we can proceed, but we lose the backup.
+            # This might happen on the very first save if the bak file exists from a failed prior run.
+            pass
+
+
+        # 3. Atomically rename the temporary file to the final destination
+        os.rename(tmp_file, DATA_FILE)
+
+    except (IOError, OSError, json.JSONDecodeError) as e:
+        print(f"Error during save: {e}. Attempting to restore backup.")
+        try:
+            # If something went wrong, try to restore the backup.
+            if os.path.exists(bak_file):
+                os.rename(bak_file, DATA_FILE)
+        except OSError as e_restore:
+            print(f"FATAL: Could not restore backup file: {e_restore}")
+        # Clean up temp file if it exists
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
 
 # -----------------------------
 # GUI (thread-safe posting)
@@ -2669,11 +2287,27 @@ class KawaiiKuroGUI:
             self.action_buttons.append(button)
 
         self.queue = deque()
+        self.is_typing = False # For animation
         self.root.after(200, self._drain_queue)
 
         self._update_gui_labels()
         self._update_knowledge_panel()
         self.post_message("KawaiiKuro: Hey, my love~ *winks* Chat with me!", tag='system')
+
+    def _animate_typing(self):
+        if not self.is_typing:
+            return
+        current_text = self.typing_label.cget("text")
+        if current_text.endswith("..."):
+            new_text = "Kuro is thinking."
+        elif current_text.endswith(".."):
+            new_text = "Kuro is thinking..."
+        elif current_text.endswith("."):
+            new_text = "Kuro is thinking.."
+        else:
+            new_text = "Kuro is thinking."
+        self.typing_label.config(text=new_text)
+        self.root.after(350, self._animate_typing)
 
     def _update_knowledge_panel(self):
         self.knowledge_text.config(state=tk.NORMAL)
@@ -2746,7 +2380,7 @@ class KawaiiKuroGUI:
 
         self.mood_canvas.itemconfig(self.mood_indicator, fill=mood_indicator_color)
 
-        avatar_image = self.avatar_images.get(dominant_mood, self.avatar_images['neutral'])
+        avatar_image = self.avatar_images.get(dominant_mood, self.avatar_images.get('neutral'))
         self.avatar_label.config(image=avatar_image)
         self.outfit_label.config(text=f"KawaiiKuro in {outfit}")
 
@@ -2784,7 +2418,11 @@ class KawaiiKuroGUI:
             self.root.quit()
             return
 
-        self.typing_label.config(text="KawaiiKuro is typing...")
+        # --- Start of thinking state ---
+        self.is_typing = True
+        self.avatar_label.config(image=self.avatar_images.get('thoughtful', self.avatar_images.get('neutral')))
+        self._animate_typing()
+
         self.send_button.config(state=tk.DISABLED)
         self.voice_button.config(state=tk.DISABLED)
         for btn in self.action_buttons:
@@ -2808,12 +2446,17 @@ class KawaiiKuroGUI:
 
         def display_final_response():
             # This is scheduled to run on the main GUI thread
+
+            # --- End of thinking state ---
+            self.is_typing = False
             self.typing_label.config(text="")
+
             self.post_message(f"KawaiiKuro: {reply}", 'kuro')
             if self.voice:
                 # Run speech in a separate thread to avoid blocking GUI
                 threading.Thread(target=self.voice.speak, args=(reply,), daemon=True).start()
 
+            # This will restore the avatar to the correct mood
             self._update_gui_labels()
             self.send_button.config(state=tk.NORMAL)
             self.voice_button.config(state=tk.NORMAL)
