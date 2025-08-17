@@ -14,31 +14,17 @@ KawaiiKuro is a desktop AI companion with a unique "gothic anime waifu" personal
 
 ## Setup and Installation
 
-To get started with KawaiiKuro, follow these steps:
+To get started with KawaiiKuro, you only need to have Python 3.9 or newer installed on your system.
 
-1.  **Python:** Ensure you have Python 3.9 or newer installed.
-
-2.  **Clone the Repository:**
-    ```bash
-    git clone <repository_url>
-    cd <repository_directory>
-    ```
-    (Or simply download the `kawaii_kuro.py` and `requirements.txt` files into the same directory).
-
-3.  **Install Dependencies:**
-    Install the required Python packages using the `requirements.txt` file:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-4.  **NLTK Data:** The first time you run the application, it will automatically download necessary data models from the NLTK library. This is a one-time setup process.
+Clone or download the repository, then navigate into the project directory.
 
 ## How to Run
 
-To start the application, simply run the main script from your terminal:
+To start the application, simply run the `run_kuro.py` script from your terminal:
 ```bash
-python kawaii_kuro.py
+python run_kuro.py
 ```
+The first time you run this script, it will automatically install all the required dependencies and download the necessary NLTK data. This is a one-time setup process. On subsequent launches, it will start the application directly.
 This will launch the KawaiiKuro chat window.
 
 ## In-App Commands
