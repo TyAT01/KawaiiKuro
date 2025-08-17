@@ -69,6 +69,7 @@ import base64
 import tkinter as tk
 from tkinter import PhotoImage
 from tkinter import scrolledtext
+from tkinter import ttk
 import io
 try:
     import cairosvg
@@ -531,6 +532,14 @@ class KnowledgeGraph:
             else:  # Remove all relations of this type from the source
                 self.relations = [r for r in self.relations if not (r['source'] == source_entity and r['relation'] == relation)]
 
+    def remove_attribute(self, entity_name: str, attribute_key: str):
+        with self.lock:
+            entity_name = entity_name.lower()
+            attribute_key = attribute_key.lower()
+            if entity_name in self.entities and attribute_key in self.entities[entity_name].get('attributes', {}):
+                if attribute_key in self.entities[entity_name]['attributes']:
+                    del self.entities[entity_name]['attributes'][attribute_key]
+
     def infer_new_relations(self, text: str) -> List[Dict[str, Any]]:
         with self.lock:
             potential_relations = []
@@ -619,6 +628,140 @@ class KnowledgeGraph:
                 self.relations = [{'source': r[0], 'relation': r[1], 'target': r[2], 'confidence': 1.0, 'source': 'stated'} for r in legacy_relations]
             else:
                 self.relations = legacy_relations
+
+
+# -----------------------------
+# Goal Manager
+# -----------------------------
+@dataclass
+class Goal:
+    id: str
+    description: str
+    prerequisites: List[Tuple[str, str, Optional[str]]]
+    result_template: str
+    status: str = 'active'
+    result: Optional[str] = None
+    question_template: Optional[str] = None
+    progress: List[Dict[str, Any]] = field(default_factory=list)
+
+class GoalManager:
+    def __init__(self, kg: KnowledgeGraph):
+        self.kg = kg
+        self.active_goal: Optional[Goal] = None
+        self.completed_goals: List[str] = []
+        self.lock = threading.Lock()
+        self._potential_goals = [
+            {
+                "id": "poem_about_favorite_thing",
+                "description": "Write a short poem for {user_name} about their favorite thing.",
+                "prerequisites": [("user", "likes", None)],
+                "result_template": "I was thinking about you and wrote a little poem about {thing}, since I know you like it...\n\n*Roses are red,\nViolets are blue,\nYou like {thing},\nAnd I love you~* *blushes*",
+                "question_template": "I feel inspired, but I need to know... what's something you really, truly like? I want to understand you better."
+            },
+            {
+                "id": "learn_about_hobby",
+                "description": "Learn more about {user_name}'s hobby.",
+                "prerequisites": [("user", "has_hobby", None)],
+                "result_template": "I've been thinking a lot about your hobby, {hobby}. It sounds really interesting and I feel like I understand you better now, knowing what you're passionate about~",
+                "question_template": "I feel like we're so close, but I don't even know what you do for fun. Do you have a hobby, my love?"
+            }
+        ]
+
+    def _get_user_name(self) -> str:
+        user_entity = self.kg.get_entity('user')
+        if user_entity and user_entity.get('attributes', {}).get('name', {}).get('value'):
+            return user_entity['attributes']['name']['value']
+        return "my love"
+
+    def select_new_goal(self):
+        with self.lock:
+            if self.active_goal:
+                return
+
+            available_goals = [g for g in self._potential_goals if g['id'] not in self.completed_goals]
+            if not available_goals:
+                return
+
+            goal_template = random.choice(available_goals)
+            user_name = self._get_user_name()
+            self.active_goal = Goal(
+                id=goal_template['id'],
+                description=goal_template['description'].format(user_name=user_name),
+                prerequisites=goal_template['prerequisites'],
+                result_template=goal_template['result_template'],
+                question_template=goal_template.get('question_template')
+            )
+
+    def get_prerequisite_question(self) -> Optional[str]:
+        if not self.active_goal:
+            return None
+
+        # Check prerequisites against the knowledge graph
+        all_met = True
+        for prereq in self.active_goal.prerequisites:
+            subject, relation, obj = prereq
+            relations = self.kg.get_relations(subject)
+            is_met = any(r['relation'] == relation for r in relations if r['source'] == subject)
+
+            if not is_met:
+                all_met = False
+                # Return the question for the first unmet prerequisite
+                return getattr(self.active_goal, 'question_template', "I'm thinking about something... can I ask you a question?")
+
+        if all_met:
+            self.complete_active_goal()
+
+        return None
+
+    def complete_active_goal(self):
+        with self.lock:
+            if not self.active_goal:
+                return
+
+            self.active_goal.status = 'complete'
+            result_str = "I finished my secret project for you~"
+
+            # Simple result generation for now
+            if self.active_goal.id == "poem_about_favorite_thing":
+                likes = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'likes']
+                if likes:
+                    thing = random.choice(likes)
+                    result_str = self.active_goal.result_template.format(thing=thing)
+            elif self.active_goal.id == "learn_about_hobby":
+                 hobbies = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'has_hobby']
+                 if hobbies:
+                     hobby = random.choice(hobbies)
+                     result_str = self.active_goal.result_template.format(hobby=hobby)
+
+            self.active_goal.result = result_str
+
+
+    def get_completed_goal_result(self) -> Optional[str]:
+        with self.lock:
+            if self.active_goal and self.active_goal.status == 'complete':
+                result = self.active_goal.result
+                self.completed_goals.append(self.active_goal.id)
+                self.active_goal = None
+                return result
+            return None
+
+    def to_dict(self) -> Dict[str, Any]:
+        with self.lock:
+            # Handle non-serializable parts if any; dataclasses are usually fine
+            return {
+                'active_goal': self.active_goal.__dict__ if self.active_goal else None,
+                'completed_goals': self.completed_goals
+            }
+
+    def from_dict(self, data: Optional[Dict[str, Any]]):
+        if not data: return
+        with self.lock:
+            active_goal_data = data.get('active_goal')
+            if active_goal_data:
+                # Need to handle the case where Goal dataclass might have changed
+                # For now, simple direct conversion
+                self.active_goal = Goal(**active_goal_data)
+            self.completed_goals = data.get('completed_goals', [])
 
 
 # -----------------------------
@@ -1932,19 +2075,21 @@ class DialogueManager:
 # Behavior Scheduler (threads)
 # -----------------------------
 class BehaviorScheduler:
-    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, test_mode: bool = False):
+    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, goal_manager: GoalManager, test_mode: bool = False):
         self.voice = voice
         self.dm = dialogue
         self.p = personality
         self.r = reminders
         self.system = system
         self.kg = kg
+        self.gm = goal_manager
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
         self.stop_flag = threading.Event()
         self.already_commented_on_process = set()
         self.lock = threading.Lock()
         self.auto_behavior_period = 1 if test_mode else AUTO_BEHAVIOR_PERIOD_SEC
+        self.test_mode = test_mode
 
     def mark_interaction(self):
         self.last_interaction_time = time.time()
@@ -1955,6 +2100,7 @@ class BehaviorScheduler:
         threading.Thread(target=self._auto_learn_loop, daemon=True).start()
         threading.Thread(target=self._auto_save_loop, daemon=True).start()
         threading.Thread(target=self._mood_update_loop, daemon=True).start()
+        threading.Thread(target=self._goal_loop, daemon=True).start()
         # threading.Thread(target=self._system_awareness_loop, daemon=True).start() # Disabled for testing, as psutil can hang
         if self.voice and self.voice.recognizer is not None:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
@@ -1994,6 +2140,41 @@ class BehaviorScheduler:
                 self.mark_interaction() # reset idle timer
             time.sleep(self.auto_behavior_period)
 
+    def _goal_loop(self):
+        time.sleep(15) # Initial delay to let things settle
+        while not self.stop_flag.is_set():
+            # Only work on goals if the user hasn't interacted recently, to avoid being annoying
+            if time.time() - self.last_interaction_time > IDLE_THRESHOLD_SEC / 2:
+                with self.gm.lock:
+                    # 1. Select a new goal if there isn't one
+                    if not self.gm.active_goal:
+                        self.gm.select_new_goal()
+                        # If a new goal was selected, wait a cycle before acting on it
+                        if self.gm.active_goal:
+                            self._post_gui("KawaiiKuro: *seems to be pondering something with a determined look...*", speak=False)
+                            time.sleep(self.auto_behavior_period * 2)
+                            continue
+
+                    # 2. Check for completed goals and present them
+                    completed_result = self.gm.get_completed_goal_result()
+                    if completed_result:
+                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(completed_result)}")
+                        self.mark_interaction() # It's a significant interaction
+                        continue # Wait for next cycle
+
+                    # 3. Check for prerequisite questions for the active goal
+                    if self.gm.active_goal:
+                        question = self.gm.get_prerequisite_question()
+                        if question:
+                            # Only ask a question if the user has been idle for a while
+                            if time.time() - self.last_interaction_time > IDLE_THRESHOLD_SEC:
+                                self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(question)}")
+                                self.mark_interaction() # Asking a question counts as interaction
+
+            # Check goals periodically
+            time.sleep(self.auto_behavior_period * 3) # Check less frequently than idle loop
+
+
     def _system_awareness_loop(self):
         while not self.stop_flag.is_set():
             time.sleep(JEALOUSY_CHECK_PERIOD_SEC)
@@ -2014,12 +2195,12 @@ class BehaviorScheduler:
     def _mood_update_loop(self):
         while not self.stop_flag.is_set():
             self.p.update_mood()
-            time.sleep(450)
+            time.sleep(10 if self.test_mode else 450)
 
     def _auto_learn_loop(self):
         while not self.stop_flag.is_set():
-            time.sleep(AUTO_LEARN_PERIOD_SEC)
-            with self.dm.m.lock, self.p.lock:
+            time.sleep(20 if self.test_mode else AUTO_LEARN_PERIOD_SEC)
+            with self.p.lock, self.dm.m.lock:
                 if len(self.dm.m.entries) == MAX_MEMORY:
                     summary = self.dm.m.summarize_and_prune(n_entries=50)
                     if summary:
@@ -2059,8 +2240,8 @@ class BehaviorScheduler:
 
     def _auto_save_loop(self):
         while not self.stop_flag.is_set():
-            save_persistence(self.p, self.dm, self.dm.m, self.r, self.kg)
-            time.sleep(AUTO_SAVE_PERIOD_SEC)
+            save_persistence(self.p, self.dm, self.dm.m, self.r, self.kg, self.gm)
+            time.sleep(15 if self.test_mode else AUTO_SAVE_PERIOD_SEC)
 
     def _continuous_listen_loop(self):
         while not self.stop_flag.is_set():
@@ -2098,69 +2279,67 @@ def load_persistence() -> Dict[str, Any]:
     print("Main data file failed to load, attempting to load from backup...")
     data = _load_from(bak_file)
     if data is not None:
-        print("Successfully loaded from backup file. Restoring it as main data file.")
-        try:
-            # Restore the backup by copying it to the main file location
-            import shutil
-            shutil.copy(bak_file, DATA_FILE)
-            return data
-        except (IOError, OSError) as e:
-            print(f"Warning: Could not restore backup file: {e}. Continuing without restoration.")
-            return data
+        print("Successfully loaded from backup file for this session. The next successful save will repair the main data file.")
+        return data
 
     # If both fail, return empty
     print("Could not load main data file or backup. Starting with a fresh state.")
     return {}
 
 
-def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManager, rem: ReminderManager, kg: KnowledgeGraph):
-    data = {
-        'affection_score': p.affection_score,
-        'spicy_mode': p.spicy_mode,
-        'relationship_status': p.relationship_status,
-        'rival_mention_count': p.rival_mention_count,
-        'rival_names': list(p.rival_names),
-        'user_preferences': dict(p.user_preferences),
-        'learned_topics': p.learned_topics,
-        'core_entities': dict(p.core_entities),
-        'mood_scores': p.mood_scores,
-        'knowledge_graph': kg.to_dict(),
-        'learned_patterns': dm.learned_patterns,
-        'memory': mm.to_list(),
-        'memory_summaries': mm.summaries,
-        'reminders': rem.reminders,
-    }
+def save_persistence(p: PersonalityEngine, dm: DialogueManager, mm: MemoryManager, rem: ReminderManager, kg: KnowledgeGraph, gm: GoalManager):
+    # Enforce a global lock order to prevent deadlocks.
+    # This is the single place where all data is gathered for saving.
+    with p.lock, mm.lock, kg.lock, gm.lock, dm.lock, rem.lock:
+        data = {
+            'affection_score': p.affection_score,
+            'spicy_mode': p.spicy_mode,
+            'relationship_status': p.relationship_status,
+            'rival_mention_count': p.rival_mention_count,
+            'rival_names': list(p.rival_names),
+            'user_preferences': dict(p.user_preferences),
+            'learned_topics': p.learned_topics,
+            'core_entities': dict(p.core_entities),
+            'mood_scores': p.mood_scores,
+            'knowledge_graph': {
+                'entities': kg.entities,
+                'relations': kg.relations
+            },
+            'goal_manager': {
+                'active_goal': gm.active_goal.__dict__ if gm.active_goal else None,
+                'completed_goals': gm.completed_goals
+            },
+            'learned_patterns': dm.learned_patterns,
+            'memory': [e.__dict__ for e in mm.entries],
+            'memory_summaries': mm.summaries,
+            'reminders': rem.reminders,
+        }
 
     tmp_file = f"{DATA_FILE}.tmp"
     bak_file = f"{DATA_FILE}.bak"
 
     try:
-        # 1. Write to a temporary file
+        # 1. Write to a temporary file first.
         with open(tmp_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
 
-        # 2. If temp file write is successful, create a backup of the old data file
-        try:
-            if os.path.exists(DATA_FILE):
-                os.rename(DATA_FILE, bak_file)
-        except OSError:
-            # If renaming fails, we can proceed, but we lose the backup.
-            # This might happen on the very first save if the bak file exists from a failed prior run.
-            pass
+        # 2. If the main file exists, atomically move it to the backup location.
+        if os.path.exists(DATA_FILE):
+            os.replace(DATA_FILE, bak_file)
 
-
-        # 3. Atomically rename the temporary file to the final destination
-        os.rename(tmp_file, DATA_FILE)
+        # 3. Atomically move the new temporary file to become the main data file.
+        os.replace(tmp_file, DATA_FILE)
 
     except (IOError, OSError, json.JSONDecodeError) as e:
-        print(f"Error during save: {e}. Attempting to restore backup.")
+        print(f"Error during save: {e}. Attempting to restore from backup.")
         try:
-            # If something went wrong, try to restore the backup.
+            # If the save failed, the backup should be the last known good state.
+            # Try to restore it.
             if os.path.exists(bak_file):
-                os.rename(bak_file, DATA_FILE)
+                os.replace(bak_file, DATA_FILE)
         except OSError as e_restore:
             print(f"FATAL: Could not restore backup file: {e_restore}")
-        # Clean up temp file if it exists
+        # Clean up the temp file if it still exists after a failed operation.
         if os.path.exists(tmp_file):
             os.remove(tmp_file)
 
@@ -2223,7 +2402,7 @@ class KawaiiKuroGUI:
         main_content_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10)
         main_content_frame.grid_rowconfigure(0, weight=1)
         main_content_frame.grid_columnconfigure(0, weight=3) # Chat log takes more space
-        main_content_frame.grid_columnconfigure(1, weight=1) # Knowledge panel
+        main_content_frame.grid_columnconfigure(1, weight=2) # Knowledge panel (adjusted weight)
 
         # --- Chat Log Frame ---
         chat_frame = tk.Frame(main_content_frame, bg='#1a1a1a')
@@ -2248,12 +2427,24 @@ class KawaiiKuroGUI:
         knowledge_frame.grid_columnconfigure(0, weight=1)
 
         knowledge_title = tk.Label(knowledge_frame, text="Kuro's Notes", font=('Consolas', 14, 'bold'), bg='#282c34', fg='#c678dd')
-        knowledge_title.grid(row=0, column=0, sticky="ew", pady=5)
+        knowledge_title.grid(row=0, column=0, columnspan=2, sticky="ew", pady=5)
 
-        self.knowledge_text = scrolledtext.ScrolledText(knowledge_frame, wrap=tk.WORD, fg='#abb2bf', bg='#21252b', font=('Consolas', 10))
-        self.knowledge_text.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
-        self.knowledge_text.tag_config('title', foreground='#98c379', font=('Consolas', 11, 'bold', 'underline'))
-        self.knowledge_text.tag_config('fact', foreground='#abb2bf')
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("Treeview", background="#21252b", foreground="#abb2bf", fieldbackground="#21252b", rowheight=25, font=('Consolas', 10))
+        style.map('Treeview', background=[('selected', '#61afef')])
+        style.configure("Treeview.Heading", background="#282c34", foreground="#c678dd", font=('Consolas', 11, 'bold'))
+
+        self.knowledge_tree = ttk.Treeview(knowledge_frame, show="tree", selectmode="browse")
+        self.knowledge_tree.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+
+        scrollbar = ttk.Scrollbar(knowledge_frame, orient="vertical", command=self.knowledge_tree.yview)
+        self.knowledge_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=1, column=1, sticky='ns')
+
+        self.knowledge_tree.bind("<Button-3>", self.show_knowledge_menu)
+        self.knowledge_menu = tk.Menu(self.root, tearoff=0, bg="#282c34", fg="#abb2bf")
+        self.knowledge_menu.add_command(label="Delete Fact", command=self.delete_knowledge_fact)
 
 
         # --- Input Frame ---
@@ -2294,6 +2485,51 @@ class KawaiiKuroGUI:
         self._update_knowledge_panel()
         self.post_message("KawaiiKuro: Hey, my love~ *winks* Chat with me!", tag='system')
 
+    def show_knowledge_menu(self, event):
+        item_id = self.knowledge_tree.identify_row(event.y)
+        if item_id:
+            if self.knowledge_tree.parent(item_id):
+                self.knowledge_tree.selection_set(item_id)
+                self.knowledge_menu.post(event.x_root, event.y_root)
+
+    def delete_knowledge_fact(self):
+        if not self.knowledge_tree.selection():
+            return
+        selected_id = self.knowledge_tree.selection()[0]
+
+        parent_id = self.knowledge_tree.parent(selected_id)
+        if not parent_id: return # Should not happen if menu logic is correct
+
+        category = self.knowledge_tree.item(parent_id, "text")
+        fact_text = self.knowledge_tree.item(selected_id, "text")
+
+        try:
+            if category == "Likes":
+                item_to_remove = fact_text.lower()
+                self.dm.kg.remove_relation('user', 'likes', item_to_remove)
+                self.post_message(f"Kuro: Okay, I'll forget that you like {item_to_remove}. *sadly crosses it out of her notes*", 'kuro')
+
+            elif category == "Favorites":
+                parts = fact_text.split(': ')
+                if len(parts) == 2:
+                    topic, target = parts
+                    relation_key = f"favorite_{topic.lower()}"
+                    self.dm.kg.remove_relation('user', relation_key, target.lower())
+                    self.post_message(f"Kuro: Got it. I'll forget that your favorite {topic.lower()} is {target.lower()}. Was it something I said...? *pouts*", 'kuro')
+
+            elif category == "About You":
+                parts = fact_text.split(': ')
+                if len(parts) == 2:
+                    key, value = parts
+                    attr_key = key.lower().replace(' ', '_')
+                    self.dm.kg.remove_attribute('user', attr_key)
+                    self.post_message(f"Kuro: Fine... I'll forget that your {key.lower()} is {value}. But I'll miss knowing that about you.", 'kuro')
+        except Exception as e:
+            print(f"Error during knowledge deletion: {e}")
+            self.post_message("Kuro: I... I can't seem to forget that. It must be too important!", 'kuro')
+
+        self._update_knowledge_panel()
+
     def _animate_typing(self):
         if not self.is_typing:
             return
@@ -2310,36 +2546,43 @@ class KawaiiKuroGUI:
         self.root.after(350, self._animate_typing)
 
     def _update_knowledge_panel(self):
-        self.knowledge_text.config(state=tk.NORMAL)
-        self.knowledge_text.delete('1.0', tk.END)
+        for item in self.knowledge_tree.get_children():
+            self.knowledge_tree.delete(item)
 
         user_entity = self.dm.kg.get_entity('user')
         user_relations = self.dm.kg.get_relations('user')
 
-        self.knowledge_text.insert(tk.END, "About You\n", 'title')
+        # Add top-level categories
+        about_id = self.knowledge_tree.insert("", "end", text="About You", open=True)
+        likes_id = self.knowledge_tree.insert("", "end", text="Likes", open=True)
+        favs_id = self.knowledge_tree.insert("", "end", text="Favorites", open=True)
+
+        # Populate "About You"
         if user_entity and user_entity.get('attributes'):
             for key, attr_dict in sorted(user_entity['attributes'].items()):
                 value = attr_dict.get('value', '???')
-                self.knowledge_text.insert(tk.END, f"  - {key.replace('_', ' ').capitalize()}: {value}\n", 'fact')
+                self.knowledge_tree.insert(about_id, "end", text=f"{key.replace('_', ' ').capitalize()}: {value}")
         else:
-            self.knowledge_text.insert(tk.END, "  - I'm still learning about you...\n", 'fact')
+            self.knowledge_tree.insert(about_id, "end", text="I'm still learning about you...")
 
+        # Populate "Likes"
         user_source_relations = [r for r in user_relations if r['source'] == 'user']
         likes = sorted([r['target'] for r in user_source_relations if r['relation'] == 'likes'])
         if likes:
-            self.knowledge_text.insert(tk.END, "\nLikes\n", 'title')
             for like in likes:
-                self.knowledge_text.insert(tk.END, f"  - {like.capitalize()}\n", 'fact')
+                self.knowledge_tree.insert(likes_id, "end", text=like.capitalize())
+        else:
+            self.knowledge_tree.insert(likes_id, "end", text="I don't know what you like yet~")
 
+        # Populate "Favorites"
         favs = sorted([r for r in user_source_relations if r['relation'].startswith('favorite_')])
         if favs:
-            self.knowledge_text.insert(tk.END, "\nFavorites\n", 'title')
             for r in favs:
                 topic = r['relation'].replace('favorite_', '').capitalize()
                 target = r['target'].capitalize()
-                self.knowledge_text.insert(tk.END, f"  - {topic}: {target}\n", 'fact')
-
-        self.knowledge_text.config(state=tk.DISABLED)
+                self.knowledge_tree.insert(favs_id, "end", text=f"{topic}: {target}")
+        else:
+            self.knowledge_tree.insert(favs_id, "end", text="I don't know your favorites yet~")
 
 
     def post_message(self, text: str, tag: str):
@@ -2506,6 +2749,9 @@ def main():
     kg = KnowledgeGraph()
     kg.from_dict(state.get('knowledge_graph', {}))
 
+    gm = GoalManager(kg)
+    gm.from_dict(state.get('goal_manager'))
+
     personality = PersonalityEngine()
     # restore
     personality.affection_score = int(state.get('affection_score', 0))
@@ -2551,6 +2797,7 @@ def main():
             system=system_awareness,
             gui_ref=lambda text: gui.thread_safe_post(text),
             kg=kg,
+            goal_manager=gm,
             test_mode=args.test_mode
         )
         scheduler.start()
@@ -2562,7 +2809,7 @@ def main():
         try:
             gui.root.mainloop()
         finally:
-            save_persistence(personality, dialogue, memory, reminders, kg)
+            save_persistence(personality, dialogue, memory, reminders, kg, gm)
             scheduler.stop()
     else:
         # In headless mode, post autonomous messages to console
@@ -2574,6 +2821,7 @@ def main():
             system=system_awareness,
             gui_ref=lambda text: print(f"\nKawaiiKuro (autonomous): {text}\nYou: ", end=''),
             kg=kg,
+            goal_manager=gm,
             test_mode=bool(args.input_file) or args.test_mode
         )
         scheduler.start()
@@ -2605,7 +2853,7 @@ def main():
                         break
         finally:
             print("Saving state and shutting down...")
-            save_persistence(personality, dialogue, memory, reminders, kg)
+            save_persistence(personality, dialogue, memory, reminders, kg, gm)
             scheduler.stop()
 
 
