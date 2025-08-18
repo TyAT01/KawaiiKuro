@@ -1,7 +1,7 @@
-cairosvg
-nltk
-scikit-learn
-pyttsx3
-SpeechRecognition
-pocketsphinx
-psutil
+cairosvg==2.7.1
+nltk==3.9.1
+scikit-learn==1.7.1
+pyttsx3==2.99
+SpeechRecognition==3.14.3
+pocketsphinx==5.0.0rc3
+psutil==7.0.0
