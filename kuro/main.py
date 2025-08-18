@@ -91,7 +91,7 @@ def main():
         scheduler = BehaviorScheduler(
             voice=voice, dialogue=dialogue, personality=personality, reminders=reminders,
             system=system_awareness, gui_ref=lambda text: print(f"\n{text}\n"), kg=kg,
-            goal_manager=gm, persistence=persistence, test_mode=True
+            goal_manager=gm, persistence=persistence, math_eval=math_eval, test_mode=True
         )
         scheduler.start()
         time.sleep(30)
@@ -113,6 +113,7 @@ def main():
             kg=kg,
             goal_manager=gm,
             persistence=persistence,
+            math_eval=math_eval,
             test_mode=args.test_mode
         )
         scheduler.start()
@@ -140,6 +141,7 @@ def main():
             kg=kg,
             goal_manager=gm,
             persistence=persistence,
+            math_eval=math_eval,
             test_mode=bool(args.input_file) or args.test_mode
         )
         scheduler.start()

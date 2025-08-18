@@ -61,6 +61,9 @@ class MemoryManager:
 class Persistence:
     pass
 
+class MathEvaluator:
+    pass
+
 # -----------------------------
 # System Awareness
 # -----------------------------
@@ -179,7 +182,7 @@ class VoiceIO:
 # Behavior Scheduler (threads)
 # -----------------------------
 class BehaviorScheduler:
-    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, goal_manager: GoalManager, persistence: 'Persistence', test_mode: bool = False):
+    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, goal_manager: GoalManager, persistence: 'Persistence', math_eval: 'MathEvaluator', test_mode: bool = False):
         self.voice = voice
         self.dm = dialogue
         self.p = personality
@@ -188,6 +191,7 @@ class BehaviorScheduler:
         self.kg = kg
         self.gm = goal_manager
         self.persistence = persistence
+        self.math_eval = math_eval
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
         self.stop_flag = threading.Event()
@@ -219,7 +223,7 @@ class BehaviorScheduler:
         threading.Thread(target=self._mood_update_loop, daemon=True).start()
         threading.Thread(target=self._goal_loop, daemon=True).start()
         threading.Thread(target=self._dream_loop, daemon=True).start()
-        # threading.Thread(target=self._system_awareness_loop, daemon=True).start() # Disabled for testing, as psutil can hang
+        threading.Thread(target=self._system_awareness_loop, daemon=True).start() # Disabled for testing, as psutil can hang
         if self.voice and self.voice.recognizer is not None:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
 
@@ -378,6 +382,35 @@ class BehaviorScheduler:
             poem = f"{line1}\n{line2}\n{line3}"
             return f"*a strange thought crosses my mind...*\n\n{poem}"
 
+    def _practice_math(self) -> Optional[str]:
+        """Generates a simple math problem for self-entertainment."""
+        try:
+            # Generate a simple problem
+            num1 = random.randint(2, 100)
+            num2 = random.randint(2, 100)
+            operator = random.choice(['+', '-', '*', '/'])
+
+            if operator == '/':
+                # Ensure a clean division to seem smarter
+                num2 = random.randint(2, 20)
+                num1 = num1 * num2
+
+            expr = f"{num1} {operator} {num2}"
+
+            result_str = self.math_eval.eval(expr)
+
+            if "Math error" in result_str:
+                return None
+
+            responses = [
+                f"Sometimes I do a little math for fun... just to keep my mind sharp. Like this one: {result_str}",
+                f"Hehe, I'm such a nerd sometimes. I was just calculating this: {result_str}",
+                f"My brain just wandered and solved this little problem for me: {result_str}"
+            ]
+            return random.choice(responses)
+        except Exception:
+            return None
+
     def _perform_long_idle_activity(self) -> Optional[str]:
         """Chooses and performs a random reflection or self-entertainment activity."""
         possible_actions = []
@@ -398,6 +431,8 @@ class BehaviorScheduler:
         possible_actions.append(self._learn_from_local_file)
         # Add the new creative action
         possible_actions.append(self._generate_creative_text)
+        # Add the new math practice action
+        possible_actions.append(self._practice_math)
 
         if not possible_actions:
             return None
