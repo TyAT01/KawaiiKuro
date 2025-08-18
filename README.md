@@ -11,10 +11,30 @@ KawaiiKuro is a desktop AI companion with a unique "gothic anime waifu" personal
 *   **Learning Capability:** You can teach her new responses directly. She also learns automatically from your recurring conversations, adapting to your interactions over time.
 *   **Reminders:** You can ask her to set reminders for you.
 *   **Optional Voice I/O:** For a more immersive experience, you can enable voice-to-speech and speech-to-text to talk with her directly.
+*   **Screen Awareness:** When you are idle, Kuro can notice what is on your screen and make comments about it. This allows her to be more aware of your activities and engage with you in a more context-sensitive way.
 
 ## Setup and Installation
 
 To get started with KawaiiKuro, you only need to have Python 3.9 or newer installed on your system.
+
+### External Dependencies
+For the new Screen Awareness feature to work, you will need to install Google's Tesseract OCR engine.
+
+**Windows:**
+1.  Download and run the installer from the [Tesseract at UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) page.
+2.  During installation, make sure to select the option to add Tesseract to your system PATH.
+3.  If you install it to a custom location, you will need to update the path in `kuro/systems.py`.
+
+**macOS:**
+You can install Tesseract using Homebrew:
+```bash
+brew install tesseract
+```
+
+**Linux (Debian/Ubuntu):**
+```bash
+sudo apt-get install tesseract-ocr
+```
 
 Clone or download the repository, then navigate into the project directory.
 

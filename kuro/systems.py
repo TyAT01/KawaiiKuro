@@ -24,6 +24,23 @@ try:
 except Exception:
     psutil = None
 
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
+
+try:
+    import mss
+except ImportError:
+    mss = None
+
+try:
+    import pytesseract
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+except ImportError:
+    pytesseract = None
+
+
 from kuro.config import (
     IDLE_THRESHOLD_SEC, AUTO_BEHAVIOR_PERIOD_SEC, JEALOUSY_CHECK_PERIOD_SEC,
     AUTO_LEARN_PERIOD_SEC, AUTO_SAVE_PERIOD_SEC, AUDIO_TIMEOUT_SEC, AUDIO_PHRASE_LIMIT_SEC,
@@ -101,6 +118,34 @@ class SystemAwareness:
             # sensors_battery() can fail on desktops
             return None
         return None
+
+    def get_screen_content(self) -> Optional[str]:
+        if not all([Image, mss, pytesseract]):
+            return None
+
+        try:
+            with mss.mss() as sct:
+                monitor = sct.monitors[1]
+                sct_img = sct.grab(monitor)
+                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+
+            text = pytesseract.image_to_string(img)
+            # Basic filtering to find "interesting" text
+            lines = [line.strip() for line in text.split('\n') if len(line.strip()) > 10]
+            if not lines:
+                return None
+
+            # Very simple analysis: just pick a random "interesting" line
+            interesting_line = random.choice(lines)
+            return f"I was just looking at your screen... I saw something about '{interesting_line[:50]}...'. What are you working on?~"
+
+        except FileNotFoundError:
+            # Tesseract is not installed or not in PATH
+            # This should be logged or handled more gracefully
+            return "I tried to see what you're doing, but my vision is blurry... Is Tesseract installed?"
+        except Exception as e:
+            # Other errors (e.g., no screen, permission issues)
+            return None
 
 # -----------------------------
 # Reminders & Scheduling
@@ -223,7 +268,8 @@ class BehaviorScheduler:
         threading.Thread(target=self._mood_update_loop, daemon=True).start()
         threading.Thread(target=self._goal_loop, daemon=True).start()
         threading.Thread(target=self._dream_loop, daemon=True).start()
-        threading.Thread(target=self._system_awareness_loop, daemon=True).start() # Disabled for testing, as psutil can hang
+        threading.Thread(target=self._system_awareness_loop, daemon=True).start()
+        threading.Thread(target=self._screen_awareness_loop, daemon=True).start()
         if self.voice and self.voice.recognizer is not None:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
 
@@ -588,6 +634,19 @@ class BehaviorScheduler:
                     pass # ignore transient errors
             except Exception:
                 self._log_error("_system_awareness_loop")
+
+    def _screen_awareness_loop(self):
+        time.sleep(20) # Initial delay
+        while not self.stop_flag.is_set():
+            time.sleep(30) # Check every 30 seconds
+            try:
+                # Only run if the user is idle
+                if time.time() - self.last_interaction_time > self.idle_threshold * 2:
+                    comment = self.system.get_screen_content()
+                    if comment:
+                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(comment)}")
+            except Exception:
+                self._log_error("_screen_awareness_loop")
 
     def _mood_update_loop(self):
         while not self.stop_flag.is_set():
