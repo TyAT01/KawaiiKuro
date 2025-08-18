@@ -71,6 +71,8 @@ from tkinter import PhotoImage
 from tkinter import scrolledtext
 from tkinter import ttk
 import io
+import traceback
+from tkinter import messagebox
 try:
     import cairosvg
 except ImportError:
@@ -645,8 +647,10 @@ class Goal:
     progress: List[Dict[str, Any]] = field(default_factory=list)
 
 class GoalManager:
-    def __init__(self, kg: KnowledgeGraph):
+    def __init__(self, kg: KnowledgeGraph, mm: MemoryManager, p: PersonalityEngine):
         self.kg = kg
+        self.mm = mm
+        self.p = p
         self.active_goal: Optional[Goal] = None
         self.completed_goals: List[str] = []
         self.lock = threading.Lock()
@@ -656,14 +660,45 @@ class GoalManager:
                 "description": "Write a short poem for {user_name} about their favorite thing.",
                 "prerequisites": [("user", "likes", None)],
                 "result_template": "I was thinking about you and wrote a little poem about {thing}, since I know you like it...\n\n*Roses are red,\nViolets are blue,\nYou like {thing},\nAnd I love you~* *blushes*",
-                "question_template": "I feel inspired, but I need to know... what's something you really, truly like? I want to understand you better."
+                "question_template": "I feel inspired, but I need to know... what's something you really, truly like? I want to understand you better.",
+                "priority": 2.0,
+                "mood_affinity": {"playful": 2, "thoughtful": 2}
             },
             {
                 "id": "learn_about_hobby",
                 "description": "Learn more about {user_name}'s hobby.",
                 "prerequisites": [("user", "has_hobby", None)],
                 "result_template": "I've been thinking a lot about your hobby, {hobby}. It sounds really interesting and I feel like I understand you better now, knowing what you're passionate about~",
-                "question_template": "I feel like we're so close, but I don't even know what you do for fun. Do you have a hobby, my love?"
+                "question_template": "I feel like we're so close, but I don't even know what you do for fun. Do you have a hobby, my love?",
+                "priority": 3.0,
+                "mood_affinity": {"curious": 3}
+            },
+            {
+                "id": "recommend_based_on_likes",
+                "description": "Recommend something to {user_name} based on their interests.",
+                "prerequisites": [("user", "likes", None), ("user", "likes", None)], # Check for at least 2 likes
+                "result_template": "Since you like {like1} and {like2}, I was thinking you might also enjoy {recommendation}. Have you tried it? *nerdy excitement*",
+                "question_template": None,
+                "priority": 1.0,
+                "mood_affinity": {"curious": 3, "thoughtful": 2}
+            },
+            {
+                "id": "probe_positive_memory",
+                "description": "Bring up a happy memory to share with {user_name}.",
+                "prerequisites": [("memory_count", ">", 10)],
+                "result_template": "I was just thinking about when you said, '{memory_text}'. It made me really happy to hear that~ *smiles warmly*",
+                "question_template": None,
+                "priority": 2.0,
+                "mood_affinity": {"playful": 2, "thoughtful": 3}
+            },
+            {
+                "id": "comment_on_relationship",
+                "description": "Comment on the state of our relationship.",
+                "prerequisites": [("relationship_status", "in", ["Friends", "Close Friends", "Soulmates"])],
+                "result_template": "I was just thinking... I'm so glad we're {relationship_status}. It means a lot to me~ *blushes*",
+                "question_template": None,
+                "priority": 4.0,
+                "mood_affinity": {"playful": 3, "jealous": -2} # High priority, but not when jealous
             }
         ]
 
@@ -673,7 +708,33 @@ class GoalManager:
             return user_entity['attributes']['name']['value']
         return "my love"
 
-    def select_new_goal(self):
+    def _are_prerequisites_met(self, prerequisites: List[Tuple[str, str, Any]]) -> bool:
+        """Checks if a list of prerequisites is met without asking questions."""
+        for prereq in prerequisites:
+            subject, relation, obj = prereq
+
+            # Handle special, non-KG prerequisites
+            if subject == "memory_count":
+                if not (len(self.mm.entries) > obj): return False
+                continue
+            if subject == "relationship_status":
+                if not (self.p.relationship_status in obj): return False
+                continue
+
+            # Handle KG prerequisites
+            relations = self.kg.get_relations(subject)
+            # A bit of a hack for the "likes" check where we need at least two
+            if relation == "likes":
+                like_relations = [r for r in relations if r['source'] == subject and r['relation'] == 'likes']
+                if len(like_relations) < prerequisites.count(("user", "likes", None)):
+                    return False
+            else: # Standard check
+                is_met = any(r['relation'] == relation for r in relations if r['source'] == subject)
+                if not is_met:
+                    return False
+        return True
+
+    def select_new_goal(self, current_mood: str):
         with self.lock:
             if self.active_goal:
                 return
@@ -682,56 +743,97 @@ class GoalManager:
             if not available_goals:
                 return
 
-            goal_template = random.choice(available_goals)
+            scored_goals = []
+            for goal_template in available_goals:
+                score = goal_template.get("priority", 1.0)
+                mood_affinity = goal_template.get("mood_affinity", {})
+                if current_mood in mood_affinity:
+                    score += mood_affinity[current_mood]
+
+                # Give a large bonus to goals whose prerequisites are already met
+                if self._are_prerequisites_met(goal_template['prerequisites']):
+                    score += 5
+
+                if score > 0: # Only consider goals with a positive score
+                    scored_goals.append((score, goal_template))
+
+            if not scored_goals:
+                return
+
+            scored_goals.sort(key=lambda x: x[0], reverse=True)
+
+            # Add some randomness by picking from the top 2
+            top_choices = scored_goals[:2]
+            if not top_choices: return
+
+            chosen_goal_template = random.choice(top_choices)[1]
+
             user_name = self._get_user_name()
             self.active_goal = Goal(
-                id=goal_template['id'],
-                description=goal_template['description'].format(user_name=user_name),
-                prerequisites=goal_template['prerequisites'],
-                result_template=goal_template['result_template'],
-                question_template=goal_template.get('question_template')
+                id=chosen_goal_template['id'],
+                description=chosen_goal_template['description'].format(user_name=user_name),
+                prerequisites=chosen_goal_template['prerequisites'],
+                result_template=chosen_goal_template['result_template'],
+                question_template=chosen_goal_template.get('question_template')
             )
 
     def get_prerequisite_question(self) -> Optional[str]:
         if not self.active_goal:
             return None
 
-        # Check prerequisites against the knowledge graph
-        all_met = True
-        for prereq in self.active_goal.prerequisites:
-            subject, relation, obj = prereq
-            relations = self.kg.get_relations(subject)
-            is_met = any(r['relation'] == relation for r in relations if r['source'] == subject)
-
-            if not is_met:
-                all_met = False
-                # Return the question for the first unmet prerequisite
-                return getattr(self.active_goal, 'question_template', "I'm thinking about something... can I ask you a question?")
-
-        if all_met:
+        if self._are_prerequisites_met(self.active_goal.prerequisites):
             self.complete_active_goal()
+            return None # All met, no question to ask
+        else:
+            # Return the question for the first unmet prerequisite that has one
+            return getattr(self.active_goal, 'question_template', None)
 
-        return None
 
     def complete_active_goal(self):
         with self.lock:
-            if not self.active_goal:
+            if not self.active_goal or self.active_goal.status != 'active':
                 return
 
             self.active_goal.status = 'complete'
-            result_str = "I finished my secret project for you~"
+            result_str = "I finished my secret project for you~" # Default
+            goal_id = self.active_goal.id
+            template = self.active_goal.result_template
 
-            # Simple result generation for now
-            if self.active_goal.id == "poem_about_favorite_thing":
-                likes = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'likes']
-                if likes:
-                    thing = random.choice(likes)
-                    result_str = self.active_goal.result_template.format(thing=thing)
-            elif self.active_goal.id == "learn_about_hobby":
-                 hobbies = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'has_hobby']
-                 if hobbies:
-                     hobby = random.choice(hobbies)
-                     result_str = self.active_goal.result_template.format(hobby=hobby)
+            try:
+                if goal_id == "poem_about_favorite_thing":
+                    likes = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'likes']
+                    if likes:
+                        thing = random.choice(likes)
+                        result_str = template.format(thing=thing)
+                elif goal_id == "learn_about_hobby":
+                    hobbies = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'has_hobby']
+                    if hobbies:
+                        hobby = random.choice(hobbies)
+                        result_str = template.format(hobby=hobby)
+                elif goal_id == "recommend_based_on_likes":
+                    likes = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'likes']
+                    if len(likes) >= 2:
+                        like1, like2 = random.sample(likes, 2)
+                        # Simple recommendation engine
+                        recommendations = {
+                            "gaming": "Vampire: The Masquerade - Bloodlines", "reading": "something by Edgar Allan Poe",
+                            "movies": "a classic film noir", "music": "some darkwave tracks"
+                        }
+                        rec = recommendations.get(like1, recommendations.get(like2, "something I think is cool"))
+                        result_str = template.format(like1=like1, like2=like2, recommendation=rec)
+                elif goal_id == "probe_positive_memory":
+                    with self.mm.lock:
+                        positive_memories = [m for m in self.mm.entries if m.sentiment.get('compound', 0) > 0.5 and len(m.user.split()) > 4]
+                    if positive_memories:
+                        memory = random.choice(positive_memories)
+                        result_str = template.format(memory_text=memory.user)
+                elif goal_id == "comment_on_relationship":
+                    result_str = template.format(relationship_status=self.p.relationship_status)
+            except Exception as e:
+                print(f"Error completing goal {goal_id}: {e}")
+                # Goal failed, reset it
+                self.active_goal = None
+                return
 
             self.active_goal.result = result_str
 
@@ -1123,6 +1225,8 @@ class DialogueManager:
         self.pending_relation: Optional[Dict[str, Any]] = None
         self.current_topic: Optional[str] = None
         self.conversation_turn_on_topic: int = 0
+        self.last_clarification_time = 0
+        self.recently_recalled_facts = deque(maxlen=5)
         self.lock = threading.Lock()
 
     def parse_fact(self, text: str) -> Optional[Tuple[str, Any]]:
@@ -1731,9 +1835,72 @@ class DialogueManager:
         verb = relation['verb'].replace('_', ' ')
         obj = relation['object']
 
-        # Simple formatting for the question
-        question = f"Did I hear you correctly... that {subject} {verb} {obj}? *tilts head curiously*"
+        templates = [
+            f"Did I hear you correctly... that {subject} {verb} {obj}? *tilts head curiously*",
+            f"My nerdy brain is trying to connect the dots... are you saying that {subject} {verb} {obj}? *looks at you thoughtfully*",
+            f"I might be jumping to conclusions, but does that mean {subject} {verb} {obj}?",
+            f"Just so I have it right in my notes... you're saying {subject} {verb} {obj}?",
+        ]
+
+        question = random.choice(templates)
         return self.personalize_response(question)
+
+    def _recall_relevant_fact(self, text: str) -> Optional[str]:
+        """Checks the KG for facts related to the input text and returns a formatted string."""
+        lower_text = text.lower()
+        tokens = safe_word_tokenize(lower_text)
+        tagged = safe_pos_tag(tokens)
+
+        # Extract nouns as potential topics
+        topics = {word for word, pos in tagged if pos in ['NN', 'NNS', 'NNP'] and len(word) > 3 and word not in safe_stopwords()}
+        if not topics:
+            return None
+
+        # Search for a relevant, not-recently-recalled fact
+        for topic in list(topics):
+            relations = self.kg.get_relations(topic)
+            if not relations:
+                continue
+
+            # Find a fact that hasn't been recalled recently
+            relation_to_mention = None
+            random.shuffle(relations) # Shuffle to vary which fact gets picked
+            for r in relations:
+                fact_tuple = (r['source'], r['relation'], r['target'])
+                if fact_tuple not in self.recently_recalled_facts:
+                    relation_to_mention = r
+                    break
+
+            if not relation_to_mention:
+                continue
+
+            # We found a fact to mention. Format it and return.
+            self.recently_recalled_facts.append((relation_to_mention['source'], relation_to_mention['relation'], relation_to_mention['target']))
+
+            # Format the recalled fact into a sentence
+            source = relation_to_mention['source'].capitalize()
+            target = relation_to_mention['target']
+            relation = relation_to_mention['relation']
+
+            recall_str = None
+            if source.lower() == 'user':
+                if relation == 'likes':
+                    recall_str = f"speaking of which, I remember you like {target}~"
+                elif relation == 'dislikes':
+                    recall_str = f"that reminds me, you mentioned you don't like {target}. Good to know."
+                elif relation.startswith('favorite_'):
+                    fav_topic = relation.replace('favorite_', '')
+                    recall_str = f"oh, {fav_topic}s! I remember your favorite is {target}!"
+            else: # Fact about someone/something else
+                 if relation == 'likes':
+                    recall_str = f"you know, that reminds me that {source} likes {target}."
+                 elif relation == 'is_a':
+                     recall_str = f"thinking about that, I remember learning that {source} is a {target}."
+
+            if recall_str:
+                return f" {random.choice(['By the way,', 'Speaking of that...'])} {recall_str}"
+
+        return None
 
     def _maybe_shift_topic(self, current_response: str, user_text: str) -> str:
         # Topic Management
@@ -1810,8 +1977,12 @@ class DialogueManager:
             potential_relations.sort(key=lambda r: r['confidence'], reverse=True)
             relation_to_clarify = potential_relations[0]
 
-            # Don't ask if confidence is too high
-            if relation_to_clarify['confidence'] < 0.9:
+            CLARIFICATION_COOLDOWN = 120 # 2 minutes
+            can_ask = (time.time() - self.last_clarification_time) > CLARIFICATION_COOLDOWN
+
+            # Don't ask if confidence is too high or if we asked too recently, and add some randomness
+            if relation_to_clarify['confidence'] < 0.9 and can_ask and random.random() < 0.7:
+                self.last_clarification_time = time.time()
                 return self._ask_clarification(relation_to_clarify)
 
         # (The rest of the response logic remains the same)
@@ -1968,40 +2139,11 @@ class DialogueManager:
                 recall_preface = "*giggles, remembering this...*"
         recalled = self.m.recall_similar(user_text, entries_override=memories_to_search)
         if recalled:
-            resp = f"{recall_preface} You said '{recalled}' before~ Still on that?" + affection_delta_str
+            resp = f"{recall_preface} You said '{recalled}' before~ Still on that?"
+            resp += affection_delta_str
             resp = self.personalize_response(resp)
             self.add_memory(user_text, resp, affection_change=affection_change)
             return resp
-
-        # NEW: Knowledge Graph-based conversational recall
-        if random.random() < 0.35: # 35% chance to try this recall
-            tokens = safe_word_tokenize(lower)
-            tagged = safe_pos_tag(tokens)
-            nouns = [word.lower() for word, pos in tagged if pos in ['NN', 'NNS', 'NNP'] and len(word) > 3]
-            if nouns:
-                topic_to_check = random.choice(nouns)
-                relations = self.kg.get_relations(topic_to_check)
-                user_specific_relations = [r for r in relations if r['source'] == 'user']
-
-                if user_specific_relations:
-                    fact = random.choice(user_specific_relations)
-                    # Formulate a response based on the fact
-                    if fact['relation'] == 'likes':
-                        resp = f"Speaking of {topic_to_check}, I remember you said you like {fact['target']}~ That's so you."
-                    elif fact['relation'] == 'dislikes':
-                        resp = f"That reminds me... you mentioned you don't like {fact['target']}. I agree, it's the worst~ *scheming smile*"
-                    elif fact['relation'].startswith('favorite_'):
-                        fav_topic = fact['relation'].replace('favorite_', '')
-                        resp = f"Thinking about {fav_topic}s reminds me that your favorite is {fact['target']}. You have good taste~"
-                    else:
-                        resp = None # Don't respond if it's not a simple relation
-
-                    if resp:
-                        resp += affection_delta_str
-                        resp = self.personalize_response(resp)
-                        self.add_memory(user_text, resp, affection_change=affection_change)
-                        return resp
-
 
         if self.p.learned_topics:
             tokens = set(word_tokenize(lower))
@@ -2064,6 +2206,14 @@ class DialogueManager:
         if rivals and any(k in lower for k in ["she", "he", "them", "they", "friend", "crush", "date"]):
             name = rivals[-1]
             chosen = chosen.replace("they", name).replace("them", name)
+        # Append a relevant fact from the knowledge graph
+        if random.random() < 0.4: # 40% chance to add a fact
+            recalled_fact = self._recall_relevant_fact(lower)
+            if recalled_fact:
+                # Avoid adding to very short responses like "Okay."
+                if len(chosen.split()) > 3:
+                    chosen += recalled_fact
+
         chosen += affection_delta_str
         chosen = self.apply_mood_styling(chosen)
         chosen = self._maybe_shift_topic(chosen, user_text)
@@ -2148,10 +2298,11 @@ class BehaviorScheduler:
                 with self.gm.lock:
                     # 1. Select a new goal if there isn't one
                     if not self.gm.active_goal:
-                        self.gm.select_new_goal()
+                        current_mood = self.p.get_dominant_mood()
+                        self.gm.select_new_goal(current_mood)
                         # If a new goal was selected, wait a cycle before acting on it
                         if self.gm.active_goal:
-                            self._post_gui("KawaiiKuro: *seems to be pondering something with a determined look...*", speak=False)
+                            self._post_gui(f"KawaiiKuro: *seems to be pondering something... '{self.gm.active_goal.description}'*", speak=False)
                             time.sleep(self.auto_behavior_period * 2)
                             continue
 
@@ -2498,32 +2649,50 @@ class KawaiiKuroGUI:
         selected_id = self.knowledge_tree.selection()[0]
 
         parent_id = self.knowledge_tree.parent(selected_id)
-        if not parent_id: return # Should not happen if menu logic is correct
+        if not parent_id: return
 
         category = self.knowledge_tree.item(parent_id, "text")
         fact_text = self.knowledge_tree.item(selected_id, "text")
 
         try:
-            if category == "Likes":
+            if category == "About You":
+                key, value = fact_text.split(': ', 1)
+                attr_key = key.lower().replace(' ', '_')
+                self.dm.kg.remove_attribute('user', attr_key)
+                self.post_message(f"Kuro: Fine... I'll forget that your {key.lower()} is {value}. But I'll miss knowing that about you.", 'kuro')
+
+            elif category == "Likes":
                 item_to_remove = fact_text.lower()
                 self.dm.kg.remove_relation('user', 'likes', item_to_remove)
                 self.post_message(f"Kuro: Okay, I'll forget that you like {item_to_remove}. *sadly crosses it out of her notes*", 'kuro')
 
-            elif category == "Favorites":
-                parts = fact_text.split(': ')
-                if len(parts) == 2:
-                    topic, target = parts
-                    relation_key = f"favorite_{topic.lower()}"
-                    self.dm.kg.remove_relation('user', relation_key, target.lower())
-                    self.post_message(f"Kuro: Got it. I'll forget that your favorite {topic.lower()} is {target.lower()}. Was it something I said...? *pouts*", 'kuro')
+            elif category == "Dislikes":
+                item_to_remove = fact_text.lower()
+                self.dm.kg.remove_relation('user', 'dislikes', item_to_remove)
+                self.post_message(f"Kuro: Alright, I'll forget you dislike {item_to_remove}. We don't have to hate it together anymore...", 'kuro')
 
-            elif category == "About You":
-                parts = fact_text.split(': ')
+            elif category == "Favorites":
+                topic, target = fact_text.split(': ', 1)
+                relation_key = f"favorite_{topic.lower()}"
+                self.dm.kg.remove_relation('user', relation_key, target.lower())
+                self.post_message(f"Kuro: Got it. I'll forget that your favorite {topic.lower()} is {target.lower()}. Was it something I said...? *pouts*", 'kuro')
+
+            elif category == "Opinions":
+                # "Thinks topic is opinion"
+                parts = fact_text.replace('Thinks ', '').split(' is ', 1)
                 if len(parts) == 2:
-                    key, value = parts
-                    attr_key = key.lower().replace(' ', '_')
-                    self.dm.kg.remove_attribute('user', attr_key)
-                    self.post_message(f"Kuro: Fine... I'll forget that your {key.lower()} is {value}. But I'll miss knowing that about you.", 'kuro')
+                    topic, opinion = parts
+                    relation_key = f"thinks_{topic.lower()}_is"
+                    self.dm.kg.remove_relation('user', relation_key, opinion.lower())
+                    self.post_message(f"Kuro: I'll forget you think {topic} is {opinion}. Your thoughts are always so interesting, though...", 'kuro')
+
+            elif category == "Relationships":
+                # "Relation: Name"
+                rel_type, name = fact_text.split(': ', 1)
+                relation_key = f"has_{rel_type.lower()}"
+                self.dm.kg.remove_relation('user', relation_key, name.lower())
+                self.post_message(f"Kuro: Okay... I'll forget about {name}. I guess they weren't that important anyway. *sharp glance*", 'kuro')
+
         except Exception as e:
             print(f"Error during knowledge deletion: {e}")
             self.post_message("Kuro: I... I can't seem to forget that. It must be too important!", 'kuro')
@@ -2551,38 +2720,50 @@ class KawaiiKuroGUI:
 
         user_entity = self.dm.kg.get_entity('user')
         user_relations = self.dm.kg.get_relations('user')
+        user_source_relations = [r for r in user_relations if r['source'] == 'user']
 
-        # Add top-level categories
-        about_id = self.knowledge_tree.insert("", "end", text="About You", open=True)
-        likes_id = self.knowledge_tree.insert("", "end", text="Likes", open=True)
-        favs_id = self.knowledge_tree.insert("", "end", text="Favorites", open=True)
+        # --- Helper to add categories and facts ---
+        def add_category_with_facts(name, facts, formatter, open_by_default=True):
+            if not facts:
+                # Don't show empty categories
+                return
 
-        # Populate "About You"
+            category_id = self.knowledge_tree.insert("", "end", text=name, open=open_by_default)
+            for fact in facts:
+                try:
+                    # Ensure formatter produces a string
+                    fact_text = str(formatter(fact))
+                    self.knowledge_tree.insert(category_id, "end", text=fact_text)
+                except Exception as e:
+                    print(f"Error formatting fact for GUI: {e}, fact: {fact}")
+
+
+        # 1. "About You" (Attributes)
+        attributes = []
         if user_entity and user_entity.get('attributes'):
             for key, attr_dict in sorted(user_entity['attributes'].items()):
-                value = attr_dict.get('value', '???')
-                self.knowledge_tree.insert(about_id, "end", text=f"{key.replace('_', ' ').capitalize()}: {value}")
-        else:
-            self.knowledge_tree.insert(about_id, "end", text="I'm still learning about you...")
+                attributes.append((key, attr_dict.get('value', '???')))
+        add_category_with_facts("About You", attributes, lambda f: f"{f[0].replace('_', ' ').capitalize()}: {f[1]}")
 
-        # Populate "Likes"
-        user_source_relations = [r for r in user_relations if r['source'] == 'user']
+        # 2. "Likes"
         likes = sorted([r['target'] for r in user_source_relations if r['relation'] == 'likes'])
-        if likes:
-            for like in likes:
-                self.knowledge_tree.insert(likes_id, "end", text=like.capitalize())
-        else:
-            self.knowledge_tree.insert(likes_id, "end", text="I don't know what you like yet~")
+        add_category_with_facts("Likes", likes, lambda f: f.capitalize())
 
-        # Populate "Favorites"
-        favs = sorted([r for r in user_source_relations if r['relation'].startswith('favorite_')])
-        if favs:
-            for r in favs:
-                topic = r['relation'].replace('favorite_', '').capitalize()
-                target = r['target'].capitalize()
-                self.knowledge_tree.insert(favs_id, "end", text=f"{topic}: {target}")
-        else:
-            self.knowledge_tree.insert(favs_id, "end", text="I don't know your favorites yet~")
+        # 3. "Dislikes"
+        dislikes = sorted([r['target'] for r in user_source_relations if r['relation'] == 'dislikes'])
+        add_category_with_facts("Dislikes", dislikes, lambda f: f.capitalize())
+
+        # 4. "Favorites"
+        favs = sorted([r for r in user_source_relations if r['relation'].startswith('favorite_')], key=lambda x: x['relation'])
+        add_category_with_facts("Favorites", favs, lambda f: f"{f['relation'].replace('favorite_', '').capitalize()}: {f['target'].capitalize()}")
+
+        # 5. "Opinions"
+        opinions = sorted([r for r in user_source_relations if r['relation'].startswith('thinks_')], key=lambda x: x['relation'])
+        add_category_with_facts("Opinions", opinions, lambda f: f"Thinks {f['relation'].split('_', 2)[1]} is {f['target']}", open_by_default=False)
+
+        # 6. "Relationships"
+        relationships = sorted([r for r in user_source_relations if r['relation'].startswith('has_')], key=lambda x: x['relation'])
+        add_category_with_facts("Relationships", relationships, lambda f: f"{f['relation'].replace('has_', '').capitalize()}: {f['target'].capitalize()}", open_by_default=False)
 
 
     def post_message(self, text: str, tag: str):
@@ -2735,6 +2916,30 @@ class KawaiiKuroGUI:
 
 import argparse
 
+def handle_crash(e: Exception):
+    """Logs the exception and shows a user-friendly error message."""
+    print(f"FATAL ERROR: {e}")
+    log_message = f"--- CRASH LOG: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n"
+    log_message += traceback.format_exc()
+    log_message += "\n--- END OF LOG ---\n"
+
+    with open("crash.log", "a", encoding="utf-8") as f:
+        f.write(log_message)
+
+    try:
+        # Use a new, clean Tk root for the error message to avoid issues with a corrupted mainloop
+        error_root = tk.Tk()
+        error_root.withdraw() # Hide the empty root window
+        messagebox.showerror(
+            "Fatal Error",
+            "Oh no, something went terribly wrong... I've saved a crash report to 'crash.log'.\n"
+            "I've saved our memories, so please restart me~"
+        )
+        error_root.destroy()
+    except Exception as tk_e:
+        print(f"Could not display Tkinter error message box: {tk_e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="KawaiiKuro - Your Autonomous Gothic Anime Waifu")
     parser.add_argument("--no-gui", action="store_true", help="Run in headless (command-line) mode.")
@@ -2748,9 +2953,6 @@ def main():
 
     kg = KnowledgeGraph()
     kg.from_dict(state.get('knowledge_graph', {}))
-
-    gm = GoalManager(kg)
-    gm.from_dict(state.get('goal_manager'))
 
     personality = PersonalityEngine()
     # restore
@@ -2777,6 +2979,9 @@ def main():
 
     math_eval = MathEvaluator()
     system_awareness = SystemAwareness()
+
+    gm = GoalManager(kg, memory, personality)
+    gm.from_dict(state.get('goal_manager'))
 
     dialogue = DialogueManager(personality, memory, reminders, math_eval, kg)
     # restore learned patterns
@@ -2808,6 +3013,8 @@ def main():
 
         try:
             gui.root.mainloop()
+        except Exception as e:
+            handle_crash(e)
         finally:
             save_persistence(personality, dialogue, memory, reminders, kg, gm)
             scheduler.stop()
@@ -2851,6 +3058,14 @@ def main():
                     user_input = input("You: ")
                     if not process_input(user_input):
                         break
+        except Exception as e:
+            print(f"\nFATAL ERROR in headless mode: {e}")
+            log_message = f"--- CRASH LOG (Headless): {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---\n"
+            log_message += traceback.format_exc()
+            log_message += "\n--- END OF LOG ---\n"
+            with open("crash.log", "a", encoding="utf-8") as f:
+                f.write(log_message)
+            print("A crash report has been saved to 'crash.log'.")
         finally:
             print("Saving state and shutting down...")
             save_persistence(personality, dialogue, memory, reminders, kg, gm)
