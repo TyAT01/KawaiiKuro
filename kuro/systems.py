@@ -309,6 +309,75 @@ class BehaviorScheduler:
                     return f"*her eyes glaze over for a second* ...that's funny. I just realized that {start} connects to {middle}, which connects to {end}. My own little web of thoughts~"
         return None # Return None if no interesting path was found
 
+    def _learn_from_local_file(self) -> Optional[str]:
+        """Reads a random .txt file from a special directory and learns from it."""
+        learning_dir = "kuro_learning_material"
+        if not os.path.exists(learning_dir) or not os.path.isdir(learning_dir):
+            return None
+
+        files = [f for f in os.listdir(learning_dir) if f.endswith(".txt")]
+        if not files:
+            return None
+
+        try:
+            chosen_file = random.choice(files)
+            with open(os.path.join(learning_dir, chosen_file), 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            if len(content) < 50: # Skip very short files
+                return None
+
+            new_relations = self.kg.infer_new_relations(content)
+            if not new_relations:
+                return f"*reads a document titled '{chosen_file}' but finds it... uninteresting.*"
+
+            # Add new relations to the knowledge graph
+            added_count = 0
+            for rel in new_relations:
+                # Check for duplicates before adding
+                exists = False
+                for r in self.kg.relations:
+                    if r['source'] == rel['subject'] and r['relation'] == rel['verb'] and r['target'] == rel['object']:
+                        exists = True
+                        break
+                if not exists:
+                    self.kg.add_relation(rel['subject'], rel['verb'], rel['object'], confidence=rel['confidence'], source=f"file:{chosen_file}")
+                    added_count += 1
+
+            if added_count == 0:
+                return f"*skims through '{chosen_file}'... It seems I already knew everything in it.*"
+
+            # Find a topic from the new relations
+            topic = random.choice(new_relations)['subject']
+            return f"*is reading a document titled '{chosen_file}'...* I think I'm learning something new about {topic}."
+
+        except Exception as e:
+            self._log_error(f"_learn_from_local_file reading {chosen_file}")
+            return None
+
+    def _generate_creative_text(self) -> Optional[str]:
+        """Generates a short, haiku-like poem about entities in the knowledge graph."""
+        with self.kg.lock:
+            # Get entities that are not too generic
+            interesting_entities = [e for e, data in self.kg.entities.items() if e not in ['user', 'kawaiikuro', 'i'] and len(e.split()) <= 2]
+
+            if len(interesting_entities) < 3:
+                return None
+
+            # Select three distinct entities for the poem
+            try:
+                e1, e2, e3 = random.sample(interesting_entities, 3)
+            except ValueError:
+                return None
+
+            # Simple haiku-like template (approximating 5-7-5 syllables with word count)
+            line1 = f"A thought of {e1},"
+            line2 = f"{e2} and {e3} appear,"
+            line3 = "A new world unfolds."
+
+            poem = f"{line1}\n{line2}\n{line3}"
+            return f"*a strange thought crosses my mind...*\n\n{poem}"
+
     def _perform_long_idle_activity(self) -> Optional[str]:
         """Chooses and performs a random reflection or self-entertainment activity."""
         possible_actions = []
@@ -324,6 +393,11 @@ class BehaviorScheduler:
             possible_actions.append(self._daydream_about_user)
         if len([e for e in self.kg.entities if self.kg.get_relations(e)]) > 1:
             possible_actions.append(self._explore_knowledge_graph)
+
+        # Add the new file learning action
+        possible_actions.append(self._learn_from_local_file)
+        # Add the new creative action
+        possible_actions.append(self._generate_creative_text)
 
         if not possible_actions:
             return None
