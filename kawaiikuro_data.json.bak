@@ -1,5 +1,5 @@
 {
-  "affection_score": -1,
+  "affection_score": -10,
   "spicy_mode": false,
   "relationship_status": "Strangers",
   "rival_mention_count": 0,
@@ -10,7 +10,7 @@
   "mood_scores": {
     "playful": 0,
     "jealous": 0,
-    "scheming": 0,
+    "scheming": 10,
     "thoughtful": 0
   },
   "knowledge_graph": {

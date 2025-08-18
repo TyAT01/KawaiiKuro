@@ -160,6 +160,12 @@ class KawaiiKuroGUI:
             button.pack(side=tk.LEFT, padx=3)
             self.action_buttons.append(button)
 
+        # Add the new button for learned concepts
+        self.learned_concepts_button = tk.Button(self.action_frame, text="Learned Concepts", command=self.show_learned_concepts,
+                               bg='#444', fg='white', relief=tk.FLAT, activebackground='#666', borderwidth=0, padx=5, pady=2)
+        self.learned_concepts_button.pack(side=tk.LEFT, padx=3)
+
+
         self.queue = deque()
         self.is_typing = False # For animation
         self.root.after(200, self._drain_queue)
@@ -167,6 +173,38 @@ class KawaiiKuroGUI:
         self._update_gui_labels()
         self._update_knowledge_panel()
         self.post_message("KawaiiKuro: Hey, my love~ *winks* Chat with me!", tag='system')
+
+    def show_learned_concepts(self):
+        """Opens a new window to display learned topics."""
+        concepts_window = tk.Toplevel(self.root)
+        concepts_window.title("Kuro's Learned Concepts")
+        concepts_window.geometry("450x350")
+        concepts_window.configure(bg='#1a1a1a')
+        concepts_window.transient(self.root) # Keep window on top
+        concepts_window.grab_set() # Modal behavior
+
+        title_label = tk.Label(concepts_window, text="Here are some topics I've learned from you:",
+                               font=('Consolas', 12, 'bold'), fg='#c678dd', bg='#1a1a1a')
+        title_label.pack(pady=10, padx=10)
+
+        concepts_text = scrolledtext.ScrolledText(concepts_window, bg='#282c34', fg='#abb2bf', font=('Consolas', 11), wrap=tk.WORD, relief=tk.FLAT, borderwidth=0)
+        concepts_text.pack(expand=True, fill=tk.BOTH, padx=10, pady=5)
+
+        learned_topics = self.p.learned_topics
+        if not learned_topics:
+            display_text = "I haven't learned any specific topics from our conversations yet. Let's talk more!~"
+        else:
+            display_text = "Based on our chats, I think these are some recurring themes:\n\n"
+            for i, topic_words in enumerate(learned_topics):
+                display_text += f"Topic #{i+1}: {', '.join(topic_words)}\n"
+
+        concepts_text.insert(tk.END, display_text)
+        concepts_text.config(state=tk.DISABLED)
+
+        close_button = tk.Button(concepts_window, text="Close", command=concepts_window.destroy,
+                                 bg='#61afef', fg='white', activebackground='#98c379', relief=tk.FLAT)
+        close_button.pack(pady=10)
+
 
     def show_knowledge_menu(self, event):
         item_id = self.knowledge_tree.identify_row(event.y)

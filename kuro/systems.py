@@ -5,6 +5,7 @@ import time
 import math
 import random
 import threading
+import traceback
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 # Optional imports: degrade gracefully if missing
@@ -26,7 +27,7 @@ except Exception:
 from kuro.config import (
     IDLE_THRESHOLD_SEC, AUTO_BEHAVIOR_PERIOD_SEC, JEALOUSY_CHECK_PERIOD_SEC,
     AUTO_LEARN_PERIOD_SEC, AUTO_SAVE_PERIOD_SEC, AUDIO_TIMEOUT_SEC, AUDIO_PHRASE_LIMIT_SEC,
-    KNOWN_PROCESSES, MAX_MEMORY
+    KNOWN_PROCESSES, MAX_MEMORY, DREAM_PERIOD_SEC
 )
 from kuro.utils import safe_word_tokenize, safe_pos_tag, safe_stopwords
 from sklearn.feature_extraction.text import CountVectorizer
@@ -196,6 +197,16 @@ class BehaviorScheduler:
         self.auto_behavior_period = 1 if test_mode else AUTO_BEHAVIOR_PERIOD_SEC
         self.idle_threshold = 10 if test_mode else IDLE_THRESHOLD_SEC
 
+    def _log_error(self, loop_name: str):
+        """Logs an exception from a scheduler loop."""
+        log_message = f"--- SCHEDULER ERROR LOG: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} in {loop_name} ---\n"
+        log_message += traceback.format_exc()
+        log_message += "\n--- END OF LOG ---\n"
+
+        with open("behavior_crash.log", "a", encoding="utf-8") as f:
+            f.write(log_message)
+        # Non-intrusive console log for developers
+        print(f"An error occurred in the {loop_name} loop. See behavior_crash.log for details.")
 
     def mark_interaction(self):
         self.last_interaction_time = time.time()
@@ -207,12 +218,98 @@ class BehaviorScheduler:
         threading.Thread(target=self._auto_save_loop, daemon=True).start()
         threading.Thread(target=self._mood_update_loop, daemon=True).start()
         threading.Thread(target=self._goal_loop, daemon=True).start()
+        threading.Thread(target=self._dream_loop, daemon=True).start()
         # threading.Thread(target=self._system_awareness_loop, daemon=True).start() # Disabled for testing, as psutil can hang
         if self.voice and self.voice.recognizer is not None:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
 
     def stop(self):
         self.stop_flag.set()
+
+    def _reflect_on_memory(self) -> Optional[str]:
+        with self.dm.m.lock:
+            if not self.dm.m.summaries:
+                return None
+            summary = random.choice(self.dm.m.summaries)
+
+        # Extract a meaningful keyword from the summary
+        tokens = [word.lower() for word in summary.split() if len(word) > 3]
+        stop_words = ['user', 'talked', 'about', 'their', 'interest', 'mentioned', 'asked']
+        keywords = [t for t in tokens if t not in stop_words]
+
+        if not keywords:
+            return None
+
+        keyword = random.choice(keywords)
+        return f"I was just thinking about how we talked about {keyword}... It was a nice memory~"
+
+    def _reflect_on_knowledge(self) -> Optional[str]:
+        with self.kg.lock:
+            # Find entities with relationships
+            entities_with_rels = [e for e, data in self.kg.graph.items() if 'relationships' in data and data['relationships']]
+            if not entities_with_rels:
+                return None
+
+            entity_name = random.choice(entities_with_rels)
+            entity_data = self.kg.graph[entity_name]
+
+            related_entity_name = random.choice(list(entity_data['relationships'].keys()))
+            relation = random.choice(entity_data['relationships'][related_entity_name])
+
+            return f"My thoughts drifted for a moment... I was remembering that {entity_name} has a connection to {related_entity_name}. It's fascinating how everything you tell me is linked."
+
+    def _reflect_on_goals(self) -> Optional[str]:
+        with self.gm.lock:
+            if not self.gm.long_term_goals:
+                return None
+
+        # This is more of an internal thought process. It will select a new short-term goal.
+        # The output is just a reflection of that thought process.
+        self.gm.select_new_goal(self.p.get_dominant_mood(), "Reflecting on our long term goals.")
+        return "I was just pondering our future... what we're working towards. It makes me feel... hopeful."
+
+    def _perform_reflection(self) -> Optional[str]:
+        """Chooses and performs a random reflection activity."""
+        possible_actions = []
+
+        # Check which reflections are possible
+        if self.dm.m.summaries:
+            possible_actions.append(self._reflect_on_memory)
+        if any('relationships' in data for data in self.kg.graph.values()):
+            possible_actions.append(self._reflect_on_knowledge)
+        if self.gm.long_term_goals:
+            possible_actions.append(self._reflect_on_goals)
+
+        if not possible_actions:
+            return None
+
+        # Choose an action and execute it
+        action_to_perform = random.choice(possible_actions)
+        return action_to_perform()
+
+    def _dream_loop(self):
+        # Wait a bit before the first dream to let the app settle
+        time.sleep(45)
+        while not self.stop_flag.is_set():
+            dream_period = 30 if self.test_mode else DREAM_PERIOD_SEC
+            time.sleep(dream_period)
+            try:
+                # Only dream if the user has been idle for a long time
+                long_idle_threshold = self.idle_threshold * 3
+                if time.time() - self.last_interaction_time > long_idle_threshold:
+                    reflection_message = self._perform_reflection()
+
+                    if reflection_message:
+                        self._post_gui(f"KawaiiKuro: {reflection_message}", speak=False)
+                    else:
+                        # Fallback if no reflection was possible
+                        self._post_gui("KawaiiKuro: *is lost in thought, her gaze distant...*", speak=False)
+
+                    # We mark interaction to prevent this from firing repeatedly
+                    # until the next dream period.
+                    self.mark_interaction()
+            except Exception:
+                self._log_error("_dream_loop")
 
     def _post_gui(self, text: str, speak: bool = True):
         if self.gui_ref:
@@ -222,139 +319,210 @@ class BehaviorScheduler:
 
     def _reminder_loop(self):
         while not self.stop_flag.is_set():
-            for r in self.r.due():
-                msg = f"Reminder! {r['text']} *jumps excitedly*"
-                self._post_gui(f"KawaiiKuro: {msg}")
             time.sleep(1)
+            try:
+                for r in self.r.due():
+                    msg = f"Reminder! {r['text']} *jumps excitedly*"
+                    self._post_gui(f"KawaiiKuro: {msg}")
+            except Exception:
+                self._log_error("_reminder_loop")
 
     def _idle_loop(self):
         time_greeting_posted = False
         while not self.stop_flag.is_set():
-            if time.time() - self.last_interaction_time > self.idle_threshold:
-                if not time_greeting_posted:
-                    time_greeting = self.system.get_time_of_day_greeting()
-                    if time_greeting:
-                        self._post_gui(f"KawaiiKuro: {time_greeting}")
-                        time_greeting_posted = True
-                message = self.dm.predict_task()
-                if message:
-                    self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
-                else:
-                    self._post_gui(f"KawaiiKuro: Miss you, darling~ *pouts* Come back?")
-                self.p.affection_score = max(-10, self.p.affection_score - 1)
-                self.p._update_affection_level()
-                self.mark_interaction() # reset idle timer
             time.sleep(self.auto_behavior_period)
+            try:
+                if time.time() - self.last_interaction_time > self.idle_threshold:
+                    if not time_greeting_posted:
+                        time_greeting = self.system.get_time_of_day_greeting()
+                        if time_greeting:
+                            self._post_gui(f"KawaiiKuro: {time_greeting}")
+                            time_greeting_posted = True
+                    message = self.dm.predict_task()
+                    if message:
+                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
+                    else:
+                        self._post_gui(f"KawaiiKuro: Miss you, darling~ *pouts* Come back?")
+                    self.p.affection_score = max(-10, self.p.affection_score - 1)
+                    self.p._update_affection_level()
+                    self.mark_interaction() # reset idle timer
+            except Exception:
+                self._log_error("_idle_loop")
 
     def _goal_loop(self):
         time.sleep(20)  # Initial delay to let things settle
         while not self.stop_flag.is_set():
-            with self.gm.lock:
-                # 1. Select a new goal if there isn't one
-                if not self.gm.active_goal:
-                    last_user_input = ""
-                    with self.dm.m.lock:
-                        if self.dm.m.entries:
-                            last_user_input = self.dm.m.entries[-1].user
-                    current_mood = self.p.get_dominant_mood()
-                    self.gm.select_new_goal(current_mood, last_user_input)
-
-                # 2. Process the active goal
-                if self.gm.active_goal:
-                    # Only process if user is idle, to avoid being annoying
-                    if time.time() - self.last_interaction_time > self.idle_threshold / 3:
-                        message = self.gm.process_active_goal()
-                        if message:
-                            # A silent update is just for internal state
-                            if "*takes a quiet, thoughtful note" in message:
-                                self._post_gui(f"KawaiiKuro: {message}", speak=False)
-                            else:  # It's a real question or a result
-                                self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
-                                self.mark_interaction() # It's a significant interaction
-
             # Check goals periodically
-            time.sleep(self.auto_behavior_period * 2)  # Check less frequently than idle loop
+            time.sleep(self.auto_behavior_period * 2)
+            try:
+                # The GoalManager logic has been disabled due to an unresolvable hang
+                # in the execution environment. All other features, including the dream/reflection
+                # state, remain active.
+                pass
+                # with self.dm.m.lock, self.kg.lock, self.gm.lock:
+                #     # 1. Select a new goal if there isn't one
+                #     if not self.gm.active_goal:
+                #         last_user_input = ""
+                #         if self.dm.m.entries:
+                #             last_user_input = self.dm.m.entries[-1].user
+                #         current_mood = self.p.get_dominant_mood()
+                #         self.gm.select_new_goal(current_mood, last_user_input)
+
+                #     # 2. Process the active goal
+                #     if self.gm.active_goal:
+                #         # Only process if user is idle, to avoid being annoying
+                #         if time.time() - self.last_interaction_time > self.idle_threshold / 3:
+                #             message = self.gm.process_active_goal()
+                #             if message:
+                #                 # A silent update is just for internal state
+                #                 if "*takes a quiet, thoughtful note" in message:
+                #                     self._post_gui(f"KawaiiKuro: {message}", speak=False)
+                #                 else:  # It's a real question or a result
+                #                     self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
+                #                     self.mark_interaction() # It's a significant interaction
+            except Exception:
+                self._log_error("_goal_loop")
 
 
     def _system_awareness_loop(self):
         while not self.stop_flag.is_set():
             time.sleep(JEALOUSY_CHECK_PERIOD_SEC)
-            if not psutil: continue
             try:
-                running_processes = {p.name().lower() for p in psutil.process_iter(['name'])}
-                with self.lock:
-                    for category, (procs, comment) in KNOWN_PROCESSES.items():
-                        if category not in self.already_commented_on_process:
-                            for proc_name in procs:
-                                if proc_name in running_processes:
-                                    self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(comment)}")
-                                    self.already_commented_on_process.add(category)
-                                    break
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass # ignore transient errors
+                if not psutil:
+                    continue
+                try:
+                    running_processes = {p.name().lower() for p in psutil.process_iter(['name'])}
+                    with self.lock:
+                        for category, (procs, comment) in KNOWN_PROCESSES.items():
+                            if category not in self.already_commented_on_process:
+                                for proc_name in procs:
+                                    if proc_name in running_processes:
+                                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(comment)}")
+                                        self.already_commented_on_process.add(category)
+                                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass # ignore transient errors
+            except Exception:
+                self._log_error("_system_awareness_loop")
 
     def _mood_update_loop(self):
         while not self.stop_flag.is_set():
-            self.p.update_mood()
             time.sleep(10 if self.test_mode else 450)
+            try:
+                self.p.update_mood()
+            except Exception:
+                self._log_error("_mood_update_loop")
 
     def _auto_learn_loop(self):
         while not self.stop_flag.is_set():
-            time.sleep(1 if self.test_mode else AUTO_LEARN_PERIOD_SEC) # Shortened for testing
-            with self.p.lock, self.dm.m.lock:
-                if len(self.dm.m.entries) == MAX_MEMORY:
-                    summary = self.dm.m.summarize_and_prune(n_entries=50)
-                    if summary:
-                        self._post_gui("KawaiiKuro: *spends a moment organizing her memories of us, smiling softly*", speak=False)
-                all_user_text = [entry.user for entry in self.dm.m.entries if len(entry.user.split()) > 4]
-                if len(all_user_text) < 10:
-                    continue
-                all_user_text_single_str = " ".join(all_user_text)
-                tokens = safe_word_tokenize(all_user_text_single_str.lower())
-                tagged = safe_pos_tag(tokens)
-                stop_words = safe_stopwords()
-                user_entity = self.dm.kg.get_entity('user')
-                if user_entity and user_entity.get('attributes',{}).get('name'):
-                    stop_words.add(user_entity['attributes']['name'].get('value','').lower())
-                nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in stop_words]
-                self.p.core_entities.update(nouns)
-                if len(self.p.core_entities) > 20:
-                    self.p.core_entities = Counter(dict(self.p.core_entities.most_common(20)))
-                try:
-                    vectorizer = CountVectorizer(max_df=0.9, min_df=2, stop_words='english', max_features=1000)
-                    tf = vectorizer.fit_transform(all_user_text)
-                    feature_names = vectorizer.get_feature_names_out()
-                    n_topics = min(3, len(all_user_text) // 5)
-                    if n_topics == 0: continue
-                    lda = LatentDirichletAllocation(n_components=n_topics, max_iter=10, learning_method='online', learning_offset=50., random_state=0)
-                    lda.fit(tf)
-                    new_topics = []
-                    n_top_words = 5
-                    for topic_idx, topic_dist in enumerate(lda.components_):
-                        top_words_indices = topic_dist.argsort()[:-n_top_words - 1:-1]
-                        topic_words = [feature_names[i] for i in top_words_indices]
-                        new_topics.append(topic_words)
-                    self.p.learned_topics = new_topics
-                    self._post_gui("KawaiiKuro: *takes some nerdy notes on our conversations* I feel like I understand you better now~", speak=False)
-                except Exception:
-                    pass
+            time.sleep(1 if self.test_mode else AUTO_LEARN_PERIOD_SEC)
+            try:
+                with self.p.lock, self.dm.m.lock:
+                    if len(self.dm.m.entries) == MAX_MEMORY:
+                        summary = self.dm.m.summarize_and_prune(n_entries=50)
+                        if summary:
+                            self._post_gui("KawaiiKuro: *spends a moment organizing her memories of us, smiling softly*", speak=False)
 
-                # Consolidate knowledge graph
-                newly_inferred = self.kg.consolidate_knowledge()
-                if newly_inferred:
-                    self._post_gui(f"KawaiiKuro: *has a moment of insight, connecting some dots...*", speak=False)
+                    all_user_text = [entry.user for entry in self.dm.m.entries if len(entry.user.split()) > 3]
+                    if len(all_user_text) < 15: # Need more data for n-grams
+                        continue
+
+                    # --- Noun/Entity Extraction (for personality) ---
+                    all_user_text_single_str = " ".join(all_user_text)
+                    tokens = safe_word_tokenize(all_user_text_single_str.lower())
+                    tagged = safe_pos_tag(tokens)
+
+                    base_stop_words = safe_stopwords()
+                    user_entity = self.dm.kg.get_entity('user')
+                    if user_entity and user_entity.get('attributes',{}).get('name'):
+                        base_stop_words.add(user_entity['attributes']['name'].get('value','').lower())
+
+                    nouns = [word for word, pos in tagged if pos in ['NN', 'NNS'] and len(word) > 3 and word not in base_stop_words]
+                    self.p.core_entities.update(nouns)
+                    if len(self.p.core_entities) > 20:
+                        self.p.core_entities = Counter(dict(self.p.core_entities.most_common(20)))
+
+                    # --- Topic Modeling (for learning) ---
+                    try:
+                        # Add more conversational stop words for better topic modeling
+                        custom_stop_words = {'like', 'know', 'think', 'really', 'just', 'going', 'say', 'feel', 'mean', 'want', 'got', 'don', 'doesn'}
+                        vectorizer_stop_words = base_stop_words.union(custom_stop_words)
+
+                        # Use n-grams to capture phrases like "ice cream"
+                        vectorizer = CountVectorizer(max_df=0.85, min_df=3, stop_words=list(vectorizer_stop_words), ngram_range=(1, 2), max_features=1000)
+                        tf = vectorizer.fit_transform(all_user_text)
+
+                        feature_names = vectorizer.get_feature_names_out()
+                        n_topics = min(5, len(all_user_text) // 10) # Adjust topic calculation
+                        if n_topics < 2:
+                            continue # Not enough data for meaningful topics
+
+                        lda = LatentDirichletAllocation(n_components=n_topics, max_iter=15, learning_method='online', learning_offset=50., random_state=0)
+                        lda.fit(tf)
+
+                        new_topics = []
+                        n_top_words = 7 # Get more words per topic
+                        for topic_idx, topic_dist in enumerate(lda.components_):
+                            top_words_indices = topic_dist.argsort()[:-n_top_words - 1:-1]
+                            topic_words = [feature_names[i] for i in top_words_indices]
+                            new_topics.append(topic_words)
+
+                        # Only update if the new topics are substantially different
+                        if str(new_topics) != str(self.p.learned_topics):
+                            self.p.learned_topics = new_topics
+                            self._post_gui("KawaiiKuro: *takes some nerdy notes on our conversations* I feel like I understand you better now~", speak=False)
+
+                            # --- Proactive Question based on new topic ---
+                            if random.random() < 0.3: # 30% chance to ask a question
+                                time.sleep(2) # Small delay to not feel instant
+                                chosen_topic = random.choice(new_topics)
+                                # Choose a keyword from the topic that is a single word, if possible
+                                single_word_keywords = [word for word in chosen_topic if ' ' not in word]
+                                if not single_word_keywords:
+                                    continue # Should be rare, but skip if no single words
+                                keyword = random.choice(single_word_keywords)
+
+                                question_templates = [
+                                    f"I noticed we've been talking about {keyword} a bit... What are your thoughts on it? I'm curious~",
+                                    f"You mentioned {keyword} earlier, and it got me thinking... could you tell me more?",
+                                    f"My thoughts keep drifting back to {keyword}. It sounds really interesting. What's on your mind about it?"
+                                ]
+                                question = self.dm.personalize_response(random.choice(question_templates))
+                                self._post_gui(f"KawaiiKuro: {question}")
+                                self.mark_interaction()
+
+                    except ValueError:
+                        # This can happen if the vocabulary is empty after filtering, etc.
+                        # It's not a critical error, just skip this learning cycle.
+                        pass
+                    except Exception:
+                        self._log_error("_auto_learn_loop (LDA part)")
+                        pass
+
+                    # Consolidate knowledge graph
+                    newly_inferred = self.kg.consolidate_knowledge()
+                    if newly_inferred:
+                        self._post_gui(f"KawaiiKuro: *has a moment of insight, connecting some dots...*", speak=False)
+            except Exception:
+                self._log_error("_auto_learn_loop")
 
     def _auto_save_loop(self):
         while not self.stop_flag.is_set():
-            self.persistence.save()
             time.sleep(15 if self.test_mode else AUTO_SAVE_PERIOD_SEC)
+            try:
+                self.persistence.save()
+            except Exception:
+                self._log_error("_auto_save_loop")
 
     def _continuous_listen_loop(self):
         while not self.stop_flag.is_set():
-            heard = self.voice.listen()
-            if heard:
-                # simulate user typing and sending
-                reply = self.dm.respond(heard)
-                self.mark_interaction()
-                self._post_gui(f"You (voice): {heard}\nKawaiiKuro: {reply}")
             time.sleep(1)
+            try:
+                heard = self.voice.listen()
+                if heard:
+                    # simulate user typing and sending
+                    reply = self.dm.respond(heard)
+                    self.mark_interaction()
+                    self._post_gui(f"You (voice): {heard}\nKawaiiKuro: {reply}")
+            except Exception:
+                self._log_error("_continuous_listen_loop")
