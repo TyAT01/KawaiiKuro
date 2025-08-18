@@ -188,6 +188,46 @@ class KnowledgeGraph:
                 pass
         return potential_relations
 
+    def find_path(self, start_entity: str, end_entity: Optional[str] = None, max_depth: int = 3) -> Optional[List[str]]:
+        """
+        Finds a path between two entities using BFS.
+        If end_entity is None, it finds any path of max_depth.
+        """
+        with self.lock:
+            start_entity = start_entity.lower()
+            if start_entity not in self.entities:
+                return None
+
+            queue = [(start_entity, [start_entity])]
+            visited = {start_entity}
+
+            while queue:
+                current_entity, path = queue.pop(0)
+
+                if len(path) > max_depth:
+                    continue
+
+                if end_entity is None and len(path) > 1:
+                    return path # Return the first path found
+                elif end_entity and current_entity == end_entity.lower():
+                    return path # Return path to target
+
+                # Explore neighbors
+                relations = self.get_relations(current_entity)
+                neighbors = set()
+                for r in relations:
+                    if r['source'] == current_entity:
+                        neighbors.add(r['target'])
+                    else:
+                        neighbors.add(r['source'])
+
+                for neighbor in sorted(list(neighbors)): # sorted for deterministic behavior
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        new_path = path + [neighbor]
+                        queue.append((neighbor, new_path))
+            return None
+
     def to_dict(self) -> Dict[str, Any]:
         with self.lock:
             return {'entities': self.entities, 'relations': self.relations}

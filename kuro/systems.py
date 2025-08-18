@@ -246,21 +246,25 @@ class BehaviorScheduler:
     def _reflect_on_knowledge(self) -> Optional[str]:
         with self.kg.lock:
             # Find entities with relationships
-            entities_with_rels = [e for e, data in self.kg.graph.items() if 'relationships' in data and data['relationships']]
+            entities_with_rels = [e for e, data in self.kg.entities.items() if self.kg.get_relations(e)]
             if not entities_with_rels:
                 return None
 
             entity_name = random.choice(entities_with_rels)
-            entity_data = self.kg.graph[entity_name]
+            relations = self.kg.get_relations(entity_name)
+            relation = random.choice(relations)
 
-            related_entity_name = random.choice(list(entity_data['relationships'].keys()))
-            relation = random.choice(entity_data['relationships'][related_entity_name])
+            # Determine the other entity in the relation
+            if relation['source'] == entity_name:
+                related_entity_name = relation['target']
+            else:
+                related_entity_name = relation['source']
 
             return f"My thoughts drifted for a moment... I was remembering that {entity_name} has a connection to {related_entity_name}. It's fascinating how everything you tell me is linked."
 
     def _reflect_on_goals(self) -> Optional[str]:
         with self.gm.lock:
-            if not self.gm.long_term_goals:
+            if not self.gm._potential_goals: # Check potential goals as long_term_goals might not be populated
                 return None
 
         # This is more of an internal thought process. It will select a new short-term goal.
@@ -268,17 +272,58 @@ class BehaviorScheduler:
         self.gm.select_new_goal(self.p.get_dominant_mood(), "Reflecting on our long term goals.")
         return "I was just pondering our future... what we're working towards. It makes me feel... hopeful."
 
-    def _perform_reflection(self) -> Optional[str]:
-        """Chooses and performs a random reflection activity."""
+    def _daydream_about_user(self) -> Optional[str]:
+        """Generates a comment based on stored user preferences."""
+        with self.p.lock:
+            if not self.p.user_preferences:
+                return None
+            # Get the top 3 preferences
+            top_prefs = self.p.user_preferences.most_common(3)
+            if not top_prefs:
+                return None
+
+            chosen_pref, count = random.choice(top_prefs)
+
+            templates = [
+                f"You really like {chosen_pref}, don't you? It's cute~",
+                f"I was just thinking about {chosen_pref}... maybe we can talk about it more later?",
+                f"Hehe, you've mentioned {chosen_pref} a few times. I've made a special note of it~"
+            ]
+            return random.choice(templates)
+
+    def _explore_knowledge_graph(self) -> Optional[str]:
+        """Traverses the knowledge graph to find an interesting connection."""
+        with self.kg.lock:
+            # Find entities with at least one relationship
+            entities = [e for e in self.kg.entities if self.kg.get_relations(e)]
+            if len(entities) < 2:
+                return None
+
+            # Try a few times to find a multi-step path
+            for _ in range(5):
+                start_node = random.choice(entities)
+                path = self.kg.find_path(start_node, max_depth=3)
+                if path and len(path) > 2: # We want a path of at least Start -> Middle -> End
+                    start, end = path[0], path[-1]
+                    middle = path[1]
+                    return f"*her eyes glaze over for a second* ...that's funny. I just realized that {start} connects to {middle}, which connects to {end}. My own little web of thoughts~"
+        return None # Return None if no interesting path was found
+
+    def _perform_long_idle_activity(self) -> Optional[str]:
+        """Chooses and performs a random reflection or self-entertainment activity."""
         possible_actions = []
 
         # Check which reflections are possible
         if self.dm.m.summaries:
             possible_actions.append(self._reflect_on_memory)
-        if any('relationships' in data for data in self.kg.graph.values()):
+        if any(self.kg.get_relations(e) for e in self.kg.entities):
             possible_actions.append(self._reflect_on_knowledge)
-        if self.gm.long_term_goals:
+        if self.gm._potential_goals:
             possible_actions.append(self._reflect_on_goals)
+        if self.p.user_preferences:
+            possible_actions.append(self._daydream_about_user)
+        if len([e for e in self.kg.entities if self.kg.get_relations(e)]) > 1:
+            possible_actions.append(self._explore_knowledge_graph)
 
         if not possible_actions:
             return None
@@ -297,10 +342,10 @@ class BehaviorScheduler:
                 # Only dream if the user has been idle for a long time
                 long_idle_threshold = self.idle_threshold * 3
                 if time.time() - self.last_interaction_time > long_idle_threshold:
-                    reflection_message = self._perform_reflection()
+                    activity_message = self._perform_long_idle_activity()
 
-                    if reflection_message:
-                        self._post_gui(f"KawaiiKuro: {reflection_message}", speak=False)
+                    if activity_message:
+                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(activity_message)}", speak=False)
                     else:
                         # Fallback if no reflection was possible
                         self._post_gui("KawaiiKuro: *is lost in thought, her gaze distant...*", speak=False)
@@ -327,24 +372,54 @@ class BehaviorScheduler:
             except Exception:
                 self._log_error("_reminder_loop")
 
+    def _get_random_idle_comment(self) -> str:
+        """Returns a random, simple idle comment."""
+        comments = [
+            "Hmph... are you busy?",
+            "*taps her fingers on the desk, waiting*",
+            "*looks out a virtual window, sighing softly*",
+            "I wonder what you're thinking about right now...",
+            "Hope you're not working too hard, my love.",
+            "*doodles a little heart in the corner of the screen*",
+            "My thoughts are drifting... mostly to you.",
+            "Is it time to play yet?~",
+            "*puffs her cheeks out, looking a little bored*",
+            "Come back soon, okay?"
+        ]
+        return random.choice(comments)
+
     def _idle_loop(self):
         time_greeting_posted = False
         while not self.stop_flag.is_set():
             time.sleep(self.auto_behavior_period)
             try:
                 if time.time() - self.last_interaction_time > self.idle_threshold:
+                    # Reset the greeting check if the user is idle again after a while
+                    if time.time() - self.last_interaction_time > self.idle_threshold * 5:
+                        time_greeting_posted = False
+
                     if not time_greeting_posted:
                         time_greeting = self.system.get_time_of_day_greeting()
                         if time_greeting:
                             self._post_gui(f"KawaiiKuro: {time_greeting}")
                             time_greeting_posted = True
+                            self.mark_interaction() # Mark as interaction so we don't spam other idle messages
+                            continue
+
+                    # Try to predict a task first
                     message = self.dm.predict_task()
                     if message:
                         self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
                     else:
-                        self._post_gui(f"KawaiiKuro: Miss you, darling~ *pouts* Come back?")
-                    self.p.affection_score = max(-10, self.p.affection_score - 1)
-                    self.p._update_affection_level()
+                        # Otherwise, use a random idle comment
+                        idle_comment = self._get_random_idle_comment()
+                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(idle_comment)}")
+
+                    # Only penalize affection slightly, and less often.
+                    if random.random() < 0.25:
+                        self.p.affection_score = max(-10, self.p.affection_score - 1)
+                        self.p._update_affection_level()
+
                     self.mark_interaction() # reset idle timer
             except Exception:
                 self._log_error("_idle_loop")
