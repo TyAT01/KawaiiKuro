@@ -681,6 +681,7 @@ class Goal:
     priority: float = 1.0
     mood_affinity: Dict[str, int] = field(default_factory=dict)
     context_keywords: List[str] = field(default_factory=list)
+    waiting_for_relation: Optional[str] = None
 
 
 class GoalManager:
@@ -859,9 +860,17 @@ class GoalManager:
             if self._check_prerequisites(prereqs_to_check):
                 if goal.steps:
                     goal.current_step += 1
+                # Since we are advancing, we are no longer waiting for a specific answer.
+                goal.waiting_for_relation = None
                 # Don't say anything, just advance state and wait for next loop
                 return "*takes a quiet, thoughtful note, planning her next move...*"
             else:
+                # The goal is not progressing, so we need to ask a question.
+                # We need to figure out what relation we are waiting for.
+                # We assume the first prerequisite is the one we are asking about.
+                if prereqs_to_check:
+                    # e.g., ('user', 'likes_food', None) -> 'likes_food'
+                    goal.waiting_for_relation = prereqs_to_check[0][1]
                 return question_to_ask
 
     def _format_goal_result(self):
@@ -1270,12 +1279,13 @@ class VoiceIO:
 # Dialogue Manager
 # -----------------------------
 class DialogueManager:
-    def __init__(self, personality: PersonalityEngine, memory: MemoryManager, reminders: ReminderManager, math_eval: MathEvaluator, kg: KnowledgeGraph):
+    def __init__(self, personality: PersonalityEngine, memory: MemoryManager, reminders: ReminderManager, math_eval: MathEvaluator, kg: KnowledgeGraph, goal_manager: GoalManager):
         self.p = personality
         self.m = memory
         self.r = reminders
         self.math = math_eval
         self.kg = kg
+        self.gm = goal_manager
         self.learned_patterns: Dict[str, List[str]] = {}
         self.pending_relation: Optional[Dict[str, Any]] = None
         self.current_topic: Optional[str] = None
@@ -2000,7 +2010,45 @@ class DialogueManager:
                     return current_response + " " + transition_phrase
         return current_response
 
+    def _handle_goal_response(self, user_text: str) -> Optional[str]:
+        """Checks if a user's input is an answer to a pending goal question."""
+        with self.gm.lock:
+            if not self.gm.active_goal or not self.gm.active_goal.waiting_for_relation:
+                return None
+
+            goal = self.gm.active_goal
+            relation_to_learn = goal.waiting_for_relation
+            answer = user_text.strip()
+
+            # Simple parsing to get the core of the answer.
+            answer_lower = answer.lower()
+            if answer_lower.startswith("i like ") or answer_lower.startswith("i love ") or answer_lower.startswith("i enjoy "):
+                answer = " ".join(answer.split()[2:])
+
+            if not answer: # Handle empty answer after parsing
+                return None
+
+            # Add the learned fact to the knowledge graph
+            self.kg.add_relation('user', relation_to_learn, answer.lower(), source='stated_via_goal')
+
+            # Reset the waiting flag so we don't re-trigger this logic.
+            goal.waiting_for_relation = None
+
+            # Create a confirmation response
+            response = f"Ooh, {answer}! Got it~ I'll remember that. *takes a happy note*"
+
+            # Add this interaction to memory to reinforce the learning
+            self.add_memory(user_text, response, affection_change=2, is_fact_learning=True)
+
+            return self.personalize_response(response)
+
     def respond(self, user_text: str) -> str:
+        # --- Goal-Oriented Response Handling ---
+        # First, check if this input is an answer to a goal's question.
+        goal_response = self._handle_goal_response(user_text)
+        if goal_response:
+            return goal_response
+
         lower = user_text.lower().strip()
 
         # 1. Handle pending clarifications first
@@ -3108,7 +3156,7 @@ def main():
     gm = GoalManager(kg, memory, personality)
     gm.from_dict(state.get('goal_manager'))
 
-    dialogue = DialogueManager(personality, memory, reminders, math_eval, kg)
+    dialogue = DialogueManager(personality, memory, reminders, math_eval, kg, gm)
     # restore learned patterns
     for k, v in state.get('learned_patterns', {}).items():
         if isinstance(v, list):
