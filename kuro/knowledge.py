@@ -409,99 +409,104 @@ class GoalManager:
         return True
 
     def select_new_goal(self, current_mood: str, last_user_input: str = ""):
-        with self.lock:
-            if self.active_goal:
-                return
+        # Note: This method MUST be called with the GoalManager's lock held.
+        if self.active_goal:
+            return
 
-            available_goals = [g for g in self._potential_goals if g['id'] not in self.completed_goals]
-            if not available_goals:
-                return
+        available_goals = [g for g in self._potential_goals if g['id'] not in self.completed_goals]
+        if not available_goals:
+            return
 
-            scored_goals = []
-            for g_template in available_goals:
-                score = g_template.get("priority", 1.0)
-                # Mood affinity
-                mood_affinity = g_template.get("mood_affinity", {})
-                if current_mood in mood_affinity:
-                    score += mood_affinity[current_mood]
-                # Context affinity
-                for keyword in g_template.get("context_keywords", []):
-                    if keyword in last_user_input.lower():
-                        score += 5 # High bonus for contextual relevance
-                # Bonus for being partially completable
-                prereqs = g_template.get("prerequisites", g_template.get("steps", [{}])[0].get("prerequisites", []))
-                if self._check_prerequisites(prereqs):
-                    score += 2
+        scored_goals = []
+        for g_template in available_goals:
+            score = g_template.get("priority", 1.0)
+            # Mood affinity
+            mood_affinity = g_template.get("mood_affinity", {})
+            if current_mood in mood_affinity:
+                score += mood_affinity[current_mood]
+            # Context affinity
+            for keyword in g_template.get("context_keywords", []):
+                if keyword in last_user_input.lower():
+                    score += 5 # High bonus for contextual relevance
+            # Bonus for being partially completable
+            prereqs = g_template.get("prerequisites", g_template.get("steps", [{}])[0].get("prerequisites", []))
+            if self._check_prerequisites(prereqs):
+                score += 2
 
-                if score > 0:
-                    scored_goals.append((score, g_template))
+            if score > 0:
+                scored_goals.append((score, g_template))
 
-            if not scored_goals: return
+        if not scored_goals: return
 
-            scored_goals.sort(key=lambda x: x[0], reverse=True)
-            top_choices = scored_goals[:2]
-            chosen_template = random.choice(top_choices)[1]
+        scored_goals.sort(key=lambda x: x[0], reverse=True)
+        top_choices = scored_goals[:2]
+        chosen_template = random.choice(top_choices)[1]
 
-            user_name = self._get_user_name()
-            self.active_goal = Goal(
-                id=chosen_template['id'],
-                description=chosen_template['description'].format(user_name=user_name),
-                prerequisites=chosen_template.get('prerequisites', []),
-                result_template=chosen_template.get('result_template', ""),
-                question_template=chosen_template.get('question_template'),
-                steps=chosen_template.get('steps', []),
-                current_step=0,
-                priority=chosen_template.get('priority', 1.0),
-                mood_affinity=chosen_template.get('mood_affinity', {}),
-                context_keywords=chosen_template.get('context_keywords', [])
-            )
+        user_name = self._get_user_name()
+        self.active_goal = Goal(
+            id=chosen_template['id'],
+            description=chosen_template['description'].format(user_name=user_name),
+            prerequisites=chosen_template.get('prerequisites', []),
+            result_template=chosen_template.get('result_template', ""),
+            question_template=chosen_template.get('question_template'),
+            steps=chosen_template.get('steps', []),
+            current_step=0,
+            priority=chosen_template.get('priority', 1.0),
+            mood_affinity=chosen_template.get('mood_affinity', {}),
+            context_keywords=chosen_template.get('context_keywords', [])
+        )
 
     def process_active_goal(self) -> Optional[str]:
-        """Processes the current goal, returns a message if one should be sent."""
-        with self.lock:
-            if not self.active_goal:
-                return None
+        """
+        Processes the current goal, returns a message if one should be sent.
+        Note: This method MUST be called with the GoalManager's lock held.
+        """
+        if not self.active_goal:
+            return None
 
-            goal = self.active_goal
-            # 1. Check for goal completion
-            is_complete = False
-            if goal.steps: # Multi-step goal
-                if goal.current_step >= len(goal.steps):
-                    is_complete = True
-            else: # Simple goal
-                if self._check_prerequisites(goal.prerequisites):
-                    is_complete = True
+        goal = self.active_goal
+        # 1. Check for goal completion
+        is_complete = False
+        if goal.steps: # Multi-step goal
+            if goal.current_step >= len(goal.steps):
+                is_complete = True
+        else: # Simple goal
+            if self._check_prerequisites(goal.prerequisites):
+                is_complete = True
 
-            if is_complete:
-                goal.status = 'complete'
-                self._format_goal_result()
-                result = goal.result
-                self.completed_goals.append(goal.id)
-                self.active_goal = None
-                return result
+        if is_complete:
+            goal.status = 'complete'
+            self._format_goal_result()
+            result = goal.result
+            self.completed_goals.append(goal.id)
+            self.active_goal = None
+            return result
 
-            # 2. If not complete, check current step's prerequisites
-            prereqs_to_check = []
-            question_to_ask = ""
+        # 2. If not complete, check current step's prerequisites
+        prereqs_to_check = []
+        question_to_ask = ""
+        if goal.steps:
+            step = goal.steps[goal.current_step]
+            prereqs_to_check = step.get('prerequisites', [])
+            question_to_ask = step.get('question', "")
+        else: # Simple goal
+            prereqs_to_check = goal.prerequisites
+            question_to_ask = goal.question_template or ""
+
+        # 3. If prereqs are met, advance. If not, ask question.
+        if self._check_prerequisites(prereqs_to_check):
             if goal.steps:
-                step = goal.steps[goal.current_step]
-                prereqs_to_check = step.get('prerequisites', [])
-                question_to_ask = step.get('question', "")
-            else: # Simple goal
-                prereqs_to_check = goal.prerequisites
-                question_to_ask = goal.question_template or ""
-
-            # 3. If prereqs are met, advance. If not, ask question.
-            if self._check_prerequisites(prereqs_to_check):
-                if goal.steps:
-                    goal.current_step += 1
-                # Don't say anything, just advance state and wait for next loop
-                return "*takes a quiet, thoughtful note, planning her next move...*"
-            else:
-                return self._format_goal_question(question_to_ask)
+                goal.current_step += 1
+            # Don't say anything, just advance state and wait for next loop
+            return "*takes a quiet, thoughtful note, planning her next move...*"
+        else:
+            return self._format_goal_question(question_to_ask)
 
     def _format_goal_question(self, question_template: str) -> str:
-        """Fills in the question_template with data from the KG."""
+        """
+        Fills in the question_template with data from the KG.
+        Note: This method MUST be called with the GoalManager's lock held.
+        """
         if not self.active_goal or not question_template:
             return ""
 
@@ -539,7 +544,10 @@ class GoalManager:
 
 
     def _format_goal_result(self):
-        """Fills in the result_template with data from the KG."""
+        """
+        Fills in the result_template with data from the KG.
+        Note: This method MUST be called with the GoalManager's lock held.
+        """
         if not self.active_goal or not self.active_goal.result_template:
             return
 
@@ -555,9 +563,9 @@ class GoalManager:
                 hobbies = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'has_hobby']
                 if hobbies: template = template.replace("{hobby}", random.choice(hobbies))
             if "{memory_text}" in template:
-                 with self.mm.lock:
-                    positive_memories = [m for m in self.mm.entries if m.sentiment.get('compound', 0) > 0.5 and len(m.user.split()) > 4]
-                 if positive_memories:
+                # This requires the memory lock, which should be held by the calling loop
+                positive_memories = [m for m in self.mm.entries if m.sentiment.get('compound', 0) > 0.5 and len(m.user.split()) > 4]
+                if positive_memories:
                     template = template.replace("{memory_text}", random.choice(positive_memories).user)
             if "{relationship_status}" in template:
                 template = template.replace("{relationship_status}", self.p.relationship_status)
@@ -577,19 +585,19 @@ class GoalManager:
 
 
     def to_dict(self) -> Dict[str, Any]:
-        with self.lock:
-            # Handle non-serializable parts if any; dataclasses are usually fine
-            return {
-                'active_goal': self.active_goal.__dict__ if self.active_goal else None,
-                'completed_goals': self.completed_goals
-            }
+        # Note: This method MUST be called with the GoalManager's lock held.
+        # Handle non-serializable parts if any; dataclasses are usually fine
+        return {
+            'active_goal': self.active_goal.__dict__ if self.active_goal else None,
+            'completed_goals': self.completed_goals
+        }
 
     def from_dict(self, data: Optional[Dict[str, Any]]):
+        # Note: This method MUST be called with the GoalManager's lock held.
         if not data: return
-        with self.lock:
-            active_goal_data = data.get('active_goal')
-            if active_goal_data:
-                # Need to handle the case where Goal dataclass might have changed
-                # For now, simple direct conversion
-                self.active_goal = Goal(**active_goal_data)
-            self.completed_goals = data.get('completed_goals', [])
+        active_goal_data = data.get('active_goal')
+        if active_goal_data:
+            # Need to handle the case where Goal dataclass might have changed
+            # For now, simple direct conversion
+            self.active_goal = Goal(**active_goal_data)
+        self.completed_goals = data.get('completed_goals', [])

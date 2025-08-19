@@ -10,16 +10,6 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 # Optional imports: degrade gracefully if missing
 try:
-    import pyttsx3  # TTS
-except Exception:
-    pyttsx3 = None
-
-try:
-    import speech_recognition as sr  # STT
-except Exception:
-    sr = None
-
-try:
     import psutil
 except Exception:
     psutil = None
@@ -179,9 +169,14 @@ class ReminderManager:
 class VoiceIO:
     def __init__(self, rate: int = 140, enabled: bool = True):
         self.tts = None
-        if enabled and pyttsx3 is not None:
+        self.recognizer = None
+        self.pyttsx3 = None
+        self.sr = None
+
+        if enabled:
             try:
-                self.tts = pyttsx3.init()
+                self.pyttsx3 = __import__('pyttsx3')
+                self.tts = self.pyttsx3.init()
                 self.tts.setProperty('rate', rate)
                 # attempt to pick a female voice
                 voice_id = None
@@ -193,8 +188,15 @@ class VoiceIO:
                 if voice_id:
                     self.tts.setProperty('voice', voice_id)
             except Exception:
+                print("VoiceIO: pyttsx3 initialization failed, TTS will be disabled.")
                 self.tts = None
-        self.recognizer = sr.Recognizer() if enabled and sr is not None else None
+
+            try:
+                self.sr = __import__('speech_recognition')
+                self.recognizer = self.sr.Recognizer()
+            except Exception:
+                print("VoiceIO: SpeechRecognition not found, STT will be disabled.")
+                self.recognizer = None
 
     def speak(self, text: str):
         if not self.tts:
@@ -207,10 +209,10 @@ class VoiceIO:
             pass
 
     def listen(self, wake_word: str = "kawaiikuro") -> str:
-        if not self.recognizer or sr is None:
+        if not self.recognizer or not self.sr:
             return ""
         try:
-            with sr.Microphone() as source:
+            with self.sr.Microphone() as source:
                 audio = self.recognizer.listen(source, timeout=AUDIO_TIMEOUT_SEC, phrase_time_limit=AUDIO_PHRASE_LIMIT_SEC)
             try:
                 text = self.recognizer.recognize_sphinx(audio)
@@ -313,13 +315,15 @@ class BehaviorScheduler:
             return f"My thoughts drifted for a moment... I was remembering that {entity_name} has a connection to {related_entity_name}. It's fascinating how everything you tell me is linked."
 
     def _reflect_on_goals(self) -> Optional[str]:
-        with self.gm.lock:
+        # This requires all locks, as it interacts with all managers.
+        with self.p.lock, self.dm.m.lock, self.kg.lock, self.gm.lock:
             if not self.gm._potential_goals: # Check potential goals as long_term_goals might not be populated
                 return None
 
-        # This is more of an internal thought process. It will select a new short-term goal.
-        # The output is just a reflection of that thought process.
-        self.gm.select_new_goal(self.p.get_dominant_mood(), "Reflecting on our long term goals.")
+            # This is more of an internal thought process. It will select a new short-term goal.
+            # The output is just a reflection of that thought process.
+            last_user_input = self.dm.m.entries[-1].user if self.dm.m.entries else ""
+            self.gm.select_new_goal(self.p.get_dominant_mood(), last_user_input)
         return "I was just pondering our future... what we're working towards. It makes me feel... hopeful."
 
     def _daydream_about_user(self) -> Optional[str]:
@@ -377,29 +381,30 @@ class BehaviorScheduler:
             if len(content) < 50: # Skip very short files
                 return None
 
-            new_relations = self.kg.infer_new_relations(content)
-            if not new_relations:
-                return f"*reads a document titled '{chosen_file}' but finds it... uninteresting.*"
+            with self.kg.lock:
+                new_relations = self.kg.infer_new_relations(content)
+                if not new_relations:
+                    return f"*reads a document titled '{chosen_file}' but finds it... uninteresting.*"
 
-            # Add new relations to the knowledge graph
-            added_count = 0
-            for rel in new_relations:
-                # Check for duplicates before adding
-                exists = False
-                for r in self.kg.relations:
-                    if r['source'] == rel['subject'] and r['relation'] == rel['verb'] and r['target'] == rel['object']:
-                        exists = True
-                        break
-                if not exists:
-                    self.kg.add_relation(rel['subject'], rel['verb'], rel['object'], confidence=rel['confidence'], source=f"file:{chosen_file}")
-                    added_count += 1
+                # Add new relations to the knowledge graph
+                added_count = 0
+                for rel in new_relations:
+                    # Check for duplicates before adding
+                    exists = False
+                    for r in self.kg.relations:
+                        if r['source'] == rel['subject'] and r['relation'] == rel['verb'] and r['target'] == rel['object']:
+                            exists = True
+                            break
+                    if not exists:
+                        self.kg.add_relation(rel['subject'], rel['verb'], rel['object'], confidence=rel['confidence'], source=f"file:{chosen_file}")
+                        added_count += 1
 
-            if added_count == 0:
-                return f"*skims through '{chosen_file}'... It seems I already knew everything in it.*"
+                if added_count == 0:
+                    return f"*skims through '{chosen_file}'... It seems I already knew everything in it.*"
 
-            # Find a topic from the new relations
-            topic = random.choice(new_relations)['subject']
-            return f"*is reading a document titled '{chosen_file}'...* I think I'm learning something new about {topic}."
+                # Find a topic from the new relations
+                topic = random.choice(new_relations)['subject']
+                return f"*is reading a document titled '{chosen_file}'...* I think I'm learning something new about {topic}."
 
         except Exception as e:
             self._log_error(f"_learn_from_local_file reading {chosen_file}")
@@ -561,8 +566,10 @@ class BehaviorScheduler:
                             self.mark_interaction() # Mark as interaction so we don't spam other idle messages
                             continue
 
-                    # Try to predict a task first
-                    message = self.dm.predict_task()
+                    # Try to predict a task first, with locks
+                    with self.p.lock, self.dm.m.lock, self.kg.lock:
+                        message = self.dm.predict_task()
+
                     if message:
                         self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
                     else:
@@ -572,8 +579,9 @@ class BehaviorScheduler:
 
                     # Only penalize affection slightly, and less often.
                     if random.random() < 0.25:
-                        self.p.affection_score = max(-10, self.p.affection_score - 1)
-                        self.p._update_affection_level()
+                        with self.p.lock:
+                            self.p.affection_score = max(-10, self.p.affection_score - 1)
+                            self.p._update_affection_level()
 
                     self.mark_interaction() # reset idle timer
             except Exception:
@@ -585,31 +593,29 @@ class BehaviorScheduler:
             # Check goals periodically
             time.sleep(self.auto_behavior_period * 2)
             try:
-                # The GoalManager logic has been disabled due to an unresolvable hang
-                # in the execution environment. All other features, including the dream/reflection
-                # state, remain active.
-                pass
-                # with self.dm.m.lock, self.kg.lock, self.gm.lock:
-                #     # 1. Select a new goal if there isn't one
-                #     if not self.gm.active_goal:
-                #         last_user_input = ""
-                #         if self.dm.m.entries:
-                #             last_user_input = self.dm.m.entries[-1].user
-                #         current_mood = self.p.get_dominant_mood()
-                #         self.gm.select_new_goal(current_mood, last_user_input)
+                # Acquire all necessary locks in the canonical order to prevent deadlocks.
+                # This is the critical fix for the original hang.
+                with self.p.lock, self.dm.m.lock, self.kg.lock, self.gm.lock:
+                    # 1. Select a new goal if there isn't one
+                    if not self.gm.active_goal:
+                        last_user_input = ""
+                        if self.dm.m.entries:
+                            last_user_input = self.dm.m.entries[-1].user
+                        current_mood = self.p.get_dominant_mood()
+                        self.gm.select_new_goal(current_mood, last_user_input)
 
-                #     # 2. Process the active goal
-                #     if self.gm.active_goal:
-                #         # Only process if user is idle, to avoid being annoying
-                #         if time.time() - self.last_interaction_time > self.idle_threshold / 3:
-                #             message = self.gm.process_active_goal()
-                #             if message:
-                #                 # A silent update is just for internal state
-                #                 if "*takes a quiet, thoughtful note" in message:
-                #                     self._post_gui(f"KawaiiKuro: {message}", speak=False)
-                #                 else:  # It's a real question or a result
-                #                     self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
-                #                     self.mark_interaction() # It's a significant interaction
+                    # 2. Process the active goal
+                    if self.gm.active_goal:
+                        # Only process if user is idle, to avoid being annoying
+                        if time.time() - self.last_interaction_time > self.idle_threshold / 2:
+                            message = self.gm.process_active_goal()
+                            if message:
+                                # A silent update is just for internal state
+                                if "*takes a quiet, thoughtful note" in message:
+                                    self._post_gui(f"KawaiiKuro: {message}", speak=False)
+                                else:  # It's a real question or a result
+                                    self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
+                                    self.mark_interaction() # It's a significant interaction
             except Exception:
                 self._log_error("_goal_loop")
 
@@ -660,7 +666,7 @@ class BehaviorScheduler:
         while not self.stop_flag.is_set():
             time.sleep(1 if self.test_mode else AUTO_LEARN_PERIOD_SEC)
             try:
-                with self.p.lock, self.dm.m.lock:
+                with self.p.lock, self.dm.m.lock, self.kg.lock:
                     if len(self.dm.m.entries) == MAX_MEMORY:
                         summary = self.dm.m.summarize_and_prune(n_entries=50)
                         if summary:

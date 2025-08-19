@@ -40,6 +40,7 @@ def handle_crash(e: Exception):
 
 
 def main():
+    print("DEBUG: Main function started.")
     parser = argparse.ArgumentParser(description="KawaiiKuro - Your Autonomous Gothic Anime Waifu")
     parser.add_argument("--no-gui", action="store_true", help="Run in headless (command-line) mode.")
     parser.add_argument("--no-voice", action="store_true", help="Disable voice I/O to prevent slow startup.")
@@ -47,19 +48,39 @@ def main():
     parser.add_argument("--test-mode", action="store_true", help="Run in test mode with shorter delays.")
     parser.add_argument("--autonomous-test", action="store_true", help="Run autonomous schedulers for a short period and exit.")
     args = parser.parse_args()
+    print("DEBUG: Parsed arguments.")
 
     # Initialize all components
+    print("DEBUG: Initializing PersonalityEngine...")
     personality = PersonalityEngine()
+    print("DEBUG: Initialized PersonalityEngine.")
+    print("DEBUG: Initializing KnowledgeGraph...")
     kg = KnowledgeGraph()
+    print("DEBUG: Initialized KnowledgeGraph.")
+    print("DEBUG: Initializing MemoryManager...")
     memory = MemoryManager()
+    print("DEBUG: Initialized MemoryManager.")
+    print("DEBUG: Initializing ReminderManager...")
     reminders = ReminderManager()
+    print("DEBUG: Initialized ReminderManager.")
+    print("DEBUG: Initializing MathEvaluator...")
     math_eval = MathEvaluator()
+    print("DEBUG: Initialized MathEvaluator.")
+    print("DEBUG: Initializing SystemAwareness...")
     system_awareness = SystemAwareness()
+    print("DEBUG: Initialized SystemAwareness.")
+    print("DEBUG: Initializing GoalManager...")
     gm = GoalManager(kg, memory, personality)
+    print("DEBUG: Initialized GoalManager.")
+    print("DEBUG: Initializing DialogueManager...")
     dialogue = DialogueManager(personality, memory, reminders, math_eval, kg)
+    print("DEBUG: Initialized DialogueManager.")
+    print("DEBUG: Initializing VoiceIO...")
     voice = VoiceIO(rate=140, enabled=not args.no_voice)
-
+    print("DEBUG: Initialized VoiceIO.")
+    print("DEBUG: Initializing Persistence...")
     persistence = Persistence(personality, dialogue, memory, reminders, kg, gm)
+    print("DEBUG: Initialized Persistence.")
 
     # Load persistence
     state = persistence.load()
