@@ -248,6 +248,7 @@ class BehaviorScheduler:
         self.test_mode = test_mode
         self.auto_behavior_period = 1 if test_mode else AUTO_BEHAVIOR_PERIOD_SEC
         self.idle_threshold = 10 if test_mode else IDLE_THRESHOLD_SEC
+        self.last_autonomous_thought_time = 0
 
     def _log_error(self, loop_name: str):
         """Logs an exception from a scheduler loop."""
@@ -275,8 +276,6 @@ class BehaviorScheduler:
         threading.Thread(target=self._screen_awareness_loop, daemon=True).start()
         if self.voice and self.voice.recognizer is not None:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
-        # This is the new loop for fully autonomous thought generation
-        threading.Thread(target=self._autonomous_thought_loop, daemon=True).start()
 
     def stop(self):
         print("Scheduler: Stop flag set.")
@@ -517,6 +516,8 @@ class BehaviorScheduler:
                     # We mark interaction to prevent this from firing repeatedly
                     # until the next dream period.
                     self.mark_interaction()
+                    # A dream is a significant mental event, a good time for a follow-up thought.
+                    self.trigger_autonomous_thought()
             except Exception:
                 self._log_error("_dream_loop")
         print("Scheduler: _dream_loop stopped.")
@@ -589,6 +590,10 @@ class BehaviorScheduler:
                             self.p.affection_score = max(-10, self.p.affection_score - 1)
                             self.p._update_affection_level()
 
+                    # This call ensures that even in long periods of inactivity, Kuro will
+                    # periodically attempt to have an autonomous thought, replacing the old loop.
+                    self.trigger_autonomous_thought()
+
                     self.mark_interaction() # reset idle timer
             except Exception:
                 self._log_error("_idle_loop")
@@ -643,6 +648,8 @@ class BehaviorScheduler:
                                     if proc_name in running_processes:
                                         self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(comment)}")
                                         self.already_commented_on_process.add(category)
+                                        # Noticing a new process is a good trigger for a thought.
+                                        self.trigger_autonomous_thought()
                                         break
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     pass # ignore transient errors
@@ -668,7 +675,10 @@ class BehaviorScheduler:
         while not self.stop_flag.is_set():
             time.sleep(10 if self.test_mode else 450)
             try:
-                self.p.update_mood()
+                mood_changed = self.p.update_mood()
+                if mood_changed:
+                    # A change in mood is a perfect time for an autonomous thought.
+                    self.trigger_autonomous_thought()
             except Exception:
                 self._log_error("_mood_update_loop")
         print("Scheduler: _mood_update_loop stopped.")
@@ -731,6 +741,8 @@ class BehaviorScheduler:
                         if str(new_topics) != str(self.p.learned_topics):
                             self.p.learned_topics = new_topics
                             self._post_gui("KawaiiKuro: *takes some nerdy notes on our conversations* I feel like I understand you better now~", speak=False)
+                            # Learning something new is a great trigger for a thought
+                            self.trigger_autonomous_thought()
 
                             # --- Proactive Question based on new topic ---
                             if random.random() < 0.3: # 30% chance to ask a question
@@ -763,6 +775,8 @@ class BehaviorScheduler:
                     newly_inferred = self.kg.consolidate_knowledge()
                     if newly_inferred:
                         self._post_gui(f"KawaiiKuro: *has a moment of insight, connecting some dots...*", speak=False)
+                        # A moment of insight should trigger a new thought
+                        self.trigger_autonomous_thought()
             except Exception:
                 self._log_error("_auto_learn_loop")
         print("Scheduler: _auto_learn_loop stopped.")
@@ -788,21 +802,24 @@ class BehaviorScheduler:
             except Exception:
                 self._log_error("_continuous_listen_loop")
 
-    def _autonomous_thought_loop(self):
-        """A loop for generating proactive, autonomous thoughts when idle."""
-        time.sleep(30) # Initial delay
-        while not self.stop_flag.is_set():
-            period = 15 if self.test_mode else AUTONOMOUS_THOUGHT_PERIOD_SEC
-            time.sleep(period)
+    def trigger_autonomous_thought(self, force: bool = False):
+        """
+        Generates a proactive, autonomous thought, with a cooldown to prevent spamming.
+        This is now event-driven instead of being in its own loop.
+        """
+        now = time.time()
+        # Cooldown period to prevent thoughts from happening too close together.
+        cooldown = 30 if self.test_mode else AUTONOMOUS_THOUGHT_PERIOD_SEC * 1.5
+        if not force and (now - self.last_autonomous_thought_time < cooldown):
+            return
+
+        # Only think if the user is idle and we're using an LLM
+        if (now - self.last_interaction_time > self.idle_threshold) and hasattr(self.dm, 'generate_autonomous_thought'):
             try:
-                # Only think autonomously if the user has been idle for a bit
-                # and the LLM dialogue manager is being used.
-                if (time.time() - self.last_interaction_time > self.idle_threshold) and hasattr(self.dm, 'generate_autonomous_thought'):
-                    thought = self.dm.generate_autonomous_thought()
-                    if thought:
-                        self._post_gui(f"KawaiiKuro: {thought}")
-                        # Mark interaction so other idle loops don't fire immediately
-                        self.mark_interaction()
+                thought = self.dm.generate_autonomous_thought()
+                if thought:
+                    self._post_gui(f"KawaiiKuro: {thought}")
+                    self.mark_interaction() # Mark interaction so other idle loops don't fire immediately
+                    self.last_autonomous_thought_time = now # Update the timestamp
             except Exception:
-                self._log_error("_autonomous_thought_loop")
-        print("Scheduler: _autonomous_thought_loop stopped.")
+                self._log_error("trigger_autonomous_thought")

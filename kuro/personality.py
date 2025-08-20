@@ -131,8 +131,10 @@ class PersonalityEngine:
 
             return base_outfit
 
-    def update_mood(self, user_input: str = "", affection_change: int = 0):
+    def update_mood(self, user_input: str = "", affection_change: int = 0) -> bool:
         with self.lock:
+            initial_moods = self.mood_scores.copy()
+
             # Decay all moods slightly over time
             for mood in self.mood_scores:
                 decay_rate = 1
@@ -177,6 +179,8 @@ class PersonalityEngine:
                     self.mood_scores['thoughtful'] = min(10, self.mood_scores['thoughtful'] + 2)
                 if any(k in lower_user_input for k in ['learn', 'discover', 'new', 'interesting', 'theory', 'research', 'explain']):
                     self.mood_scores['curious'] = min(10, self.mood_scores['curious'] + 3)
+
+            return self.mood_scores != initial_moods
 
     # --- Affection & outfit ---
     def _update_affection_level(self):
