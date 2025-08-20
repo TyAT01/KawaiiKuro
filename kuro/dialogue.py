@@ -24,12 +24,13 @@ class KnowledgeGraph:
     pass
 
 class DialogueManager:
-    def __init__(self, personality: PersonalityEngine, memory: MemoryManager, reminders: ReminderManager, math_eval: MathEvaluator, kg: KnowledgeGraph):
+    def __init__(self, personality: PersonalityEngine, memory: MemoryManager, reminders: ReminderManager, math_eval: MathEvaluator, kg: KnowledgeGraph, web_search = None):
         self.p = personality
         self.m = memory
         self.r = reminders
         self.math = math_eval
         self.kg = kg
+        self.web_search = web_search
         self.learned_patterns: Dict[str, List[str]] = {}
         self.pending_relation: Optional[Dict[str, Any]] = None
         self.current_topic: Optional[str] = None
@@ -1021,12 +1022,25 @@ class DialogueManager:
                 if chosen:
                     break
         if not chosen:
-            proactive_question = self.find_knowledge_gap_question()
-            if proactive_question:
-                chosen = proactive_question
-                affection_delta_str = ""
+            # --- Final fallback: Web Search for questions ---
+            question_starters = ["what is", "what's", "who is", "who's", "where is", "where's", "why is", "how does", "can you explain", "what does"]
+            is_question = any(lower.startswith(s) for s in question_starters)
+
+            if is_question and self.web_search:
+                query = lower
+                search_result = self.web_search.search_and_summarize(query)
+                if search_result:
+                    chosen = f"*looks up '{query}' on a dusty, arcane terminal...*\n\nHere's what I found: {search_result}"
+                else:
+                    chosen = f"I tried to search for '{query}' but came up empty... My apologies, my love."
+                affection_delta_str = "" # No affection change for web searches
             else:
-                chosen = "Tell me more, my love~ *tilts head possessively* I'm all yours."
+                proactive_question = self.find_knowledge_gap_question()
+                if proactive_question:
+                    chosen = proactive_question
+                    affection_delta_str = ""
+                else:
+                    chosen = "Tell me more, my love~ *tilts head possessively* I'm all yours."
         rivals = list(self.p.rival_names)
         if rivals and any(k in lower for k in ["she", "he", "them", "they", "friend", "crush", "date"]):
             name = rivals[-1]

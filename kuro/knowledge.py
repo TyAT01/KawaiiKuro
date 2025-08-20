@@ -308,10 +308,11 @@ class Goal:
 
 
 class GoalManager:
-    def __init__(self, kg: KnowledgeGraph, mm: MemoryManager, p: PersonalityEngine):
+    def __init__(self, kg: KnowledgeGraph, mm: MemoryManager, p: PersonalityEngine, web_search = None):
         self.kg = kg
         self.mm = mm
         self.p = p
+        self.web_search = web_search
         self.active_goal: Optional[Goal] = None
         self.completed_goals: List[str] = []
         self.lock = threading.Lock()
@@ -378,6 +379,16 @@ class GoalManager:
                 "priority": 3.0,
                 "mood_affinity": {"curious": 3, "thoughtful": 2},
                 "context_keywords": ["think", "realize", "idea", "logic"]
+            },
+            {
+                "id": "research_user_interest",
+                "description": "Research a topic {user_name} is interested in to understand them better.",
+                "prerequisites": [("user", "likes", None)],
+                "question_template": None, # This goal is silent and uses web search
+                "result_template": "You mentioned you like {interest}, so I did a little reading about it... I learned that {fact}. It's fascinating! I want to know everything you're interested in~",
+                "priority": 2.5,
+                "mood_affinity": {"thoughtful": 3, "curious": 2},
+                "context_keywords": ["interesting", "cool", "fascinating", "topic"]
             }
         ]
 
@@ -556,6 +567,19 @@ class GoalManager:
 
         # This is a simple formatter; a more robust version would parse the template
         try:
+            if goal.id == "research_user_interest" and self.web_search:
+                interests = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'likes']
+                if interests:
+                    interest_to_research = random.choice(interests)
+                    fact = self.web_search.search_and_summarize(f"what is {interest_to_research}")
+                    if fact and "I tried to search" not in fact and "couldn't find" not in fact:
+                        template = template.replace("{interest}", interest_to_research)
+                        template = template.replace("{fact}", fact)
+                    else:
+                        template = "" # Failed to research, so abort the goal message
+                else:
+                    template = "" # No interests to research
+
             if "{thing}" in template:
                 likes = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'likes']
                 if likes: template = template.replace("{thing}", random.choice(likes))

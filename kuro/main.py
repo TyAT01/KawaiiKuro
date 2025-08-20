@@ -4,11 +4,34 @@ import traceback
 from tkinter import messagebox
 import tkinter as tk
 from collections import Counter
+import faulthandler
+import signal
+from datetime import datetime
+
+# Register a signal handler to dump a traceback on SIGUSR1
+faulthandler.register(signal.SIGUSR1)
+
+# NOTE: In a real environment, these would be provided by the tool-use framework.
+# For local testing, we define dummy functions that simulate the real tools.
+def google_search(query: str) -> str:
+    """A dummy function to simulate a Google search."""
+    print(f"DUMMY SEARCH: {query}")
+    if "france" in query.lower():
+        return "[{'url': 'https://en.wikipedia.org/wiki/Paris', 'title': 'Paris - Wikipedia', 'snippet': 'Paris is the capital and most populous city of France.'}]"
+    return "[]"
+
+def view_text_website(url: str) -> str:
+    """A dummy function to simulate viewing a website."""
+    print(f"DUMMY VIEW: {url}")
+    if "paris" in url.lower():
+        return "Paris is the capital and most populous city of France. It is known for its art, culture, and landmarks such as the Eiffel Tower."
+    return "Sample website content."
+
 
 from kuro.personality import PersonalityEngine
 from kuro.knowledge import KnowledgeGraph, GoalManager
 from kuro.memory import MemoryManager
-from kuro.systems import ReminderManager, SystemAwareness, VoiceIO, BehaviorScheduler
+from kuro.systems import ReminderManager, SystemAwareness, VoiceIO, BehaviorScheduler, WebSearchManager
 from kuro.utils import MathEvaluator
 from kuro.dialogue import DialogueManager
 from kuro.persistence import Persistence
@@ -69,11 +92,14 @@ def main():
     print("DEBUG: Initializing SystemAwareness...")
     system_awareness = SystemAwareness()
     print("DEBUG: Initialized SystemAwareness.")
+    print("DEBUG: Initializing WebSearchManager...")
+    web_search = WebSearchManager(search_tool=google_search, view_tool=view_text_website)
+    print("DEBUG: Initialized WebSearchManager.")
     print("DEBUG: Initializing GoalManager...")
-    gm = GoalManager(kg, memory, personality)
+    gm = GoalManager(kg, memory, personality, web_search=web_search)
     print("DEBUG: Initialized GoalManager.")
     print("DEBUG: Initializing DialogueManager...")
-    dialogue = DialogueManager(personality, memory, reminders, math_eval, kg)
+    dialogue = DialogueManager(personality, memory, reminders, math_eval, kg, web_search=web_search)
     print("DEBUG: Initialized DialogueManager.")
     print("DEBUG: Initializing VoiceIO...")
     voice = VoiceIO(rate=140, enabled=not args.no_voice)
@@ -112,7 +138,7 @@ def main():
         scheduler = BehaviorScheduler(
             voice=voice, dialogue=dialogue, personality=personality, reminders=reminders,
             system=system_awareness, gui_ref=lambda text: print(f"\n{text}\n"), kg=kg,
-            goal_manager=gm, persistence=persistence, math_eval=math_eval, test_mode=True
+            goal_manager=gm, persistence=persistence, math_eval=math_eval, web_search=web_search, test_mode=True
         )
         scheduler.start()
         time.sleep(30)
@@ -135,6 +161,7 @@ def main():
             goal_manager=gm,
             persistence=persistence,
             math_eval=math_eval,
+            web_search=web_search,
             test_mode=args.test_mode
         )
         scheduler.start()
@@ -163,6 +190,7 @@ def main():
             goal_manager=gm,
             persistence=persistence,
             math_eval=math_eval,
+            web_search=web_search,
             test_mode=bool(args.input_file) or args.test_mode
         )
         scheduler.start()
