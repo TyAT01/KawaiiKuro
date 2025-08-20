@@ -62,9 +62,6 @@ class KnowledgeGraph:
 class GoalManager:
     pass
 
-class WebSearchManager:
-    pass
-
 class MemoryManager:
     pass
 
@@ -73,55 +70,6 @@ class Persistence:
 
 class MathEvaluator:
     pass
-
-class WebSearchManager:
-    def __init__(self, search_tool=None, view_tool=None):
-        self.search_tool = search_tool
-        self.view_tool = view_tool
-
-    def search_and_summarize(self, query: str) -> Optional[str]:
-        """
-        Searches the web for a query, reads the most promising result,
-        and returns a simple summary.
-        """
-        if not self.search_tool or not self.view_tool:
-            print("WebSearchManager: Search tools not configured.")
-            return "I feel disconnected... My ability to search the web isn't working right now. Sorry, my love."
-
-        try:
-            print(f"WebSearchManager: Searching for '{query}'...")
-            search_results_str = self.search_tool(query)
-
-            # A simple regex can extract the first URL.
-            match = re.search(r"https://[^\s,']+", search_results_str)
-            if not match:
-                print("WebSearchManager: No URL found in search results.")
-                return f"I searched for '{query}' but couldn't find a clear link... The web is a messy place."
-
-            url = match.group(0)
-            print(f"WebSearchManager: Reading content from '{url}'...")
-            website_text = self.view_tool(url)
-
-            if not website_text:
-                print("WebSearchManager: Could not retrieve website content.")
-                return f"I found a page about '{query}', but I couldn't read its contents. It might be protected or empty."
-
-            # Create a simple summary by taking the first few meaningful lines.
-            sentences = [s.strip() for s in website_text.split('\n') if len(s.strip()) > 50 and not s.strip().startswith(('!', '[', '<'))]
-            summary = " ".join(sentences[:3])
-
-            if not summary:
-                print("WebSearchManager: Could not generate a summary from the content.")
-                return None
-
-            print(f"WebSearchManager: Generated summary.")
-            return summary
-
-        except Exception as e:
-            print(f"WebSearchManager: An error occurred during web search: {e}")
-            # In a real scenario, we would use the logger from the behavior scheduler
-            # self._log_error("WebSearchManager")
-            return None
 
 
 # -----------------------------
@@ -282,7 +230,7 @@ class VoiceIO:
 # Behavior Scheduler (threads)
 # -----------------------------
 class BehaviorScheduler:
-    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, goal_manager: GoalManager, persistence: 'Persistence', math_eval: 'MathEvaluator', web_search: 'WebSearchManager', test_mode: bool = False):
+    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, goal_manager: GoalManager, persistence: 'Persistence', math_eval: 'MathEvaluator', test_mode: bool = False):
         self.voice = voice
         self.dm = dialogue
         self.p = personality
@@ -292,7 +240,6 @@ class BehaviorScheduler:
         self.gm = goal_manager
         self.persistence = persistence
         self.math_eval = math_eval
-        self.web_search = web_search
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
         self.stop_flag = threading.Event()
@@ -330,6 +277,7 @@ class BehaviorScheduler:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
 
     def stop(self):
+        print("Scheduler: Stop flag set.")
         self.stop_flag.set()
 
     def _reflect_on_memory(self) -> Optional[str]:
@@ -516,31 +464,6 @@ class BehaviorScheduler:
         except Exception:
             return None
 
-    def _research_random_interest(self) -> Optional[str]:
-        """Researches one of the user's known interests to share a fact."""
-        with self.kg.lock:
-            interests = [r['target'] for r in self.kg.get_relations('user') if r['relation'] == 'likes']
-            if not interests:
-                return None
-
-        interest = random.choice(interests)
-
-        # Avoid researching very common or generic terms
-        if interest in ['you', 'me', 'music', 'games', 'movies', 'books']:
-            return None
-
-        fact = self.web_search.search_and_summarize(f"tell me a fun fact about {interest}")
-
-        if fact and "I tried to search" not in fact and "couldn't find" not in fact:
-            responses = [
-                f"I was thinking about how you like {interest}, so I got curious and did some reading... Did you know that {fact}? I love learning about your world~",
-                f"You know how you like {interest}? My mind wandered and I found this little fact: {fact}. Hope you find it as interesting as I do!",
-                f"Since you like {interest}, I thought I'd learn more about it for you. I just discovered that {fact}! Isn't that neat?"
-            ]
-            return random.choice(responses)
-
-        return None
-
     def _perform_long_idle_activity(self) -> Optional[str]:
         """Chooses and performs a random reflection or self-entertainment activity."""
         possible_actions = []
@@ -563,9 +486,6 @@ class BehaviorScheduler:
         possible_actions.append(self._generate_creative_text)
         # Add the new math practice action
         possible_actions.append(self._practice_math)
-        # Add the new proactive research action
-        if self.web_search:
-            possible_actions.append(self._research_random_interest)
 
         if not possible_actions:
             return None
@@ -597,6 +517,7 @@ class BehaviorScheduler:
                     self.mark_interaction()
             except Exception:
                 self._log_error("_dream_loop")
+        print("Scheduler: _dream_loop stopped.")
 
     def _post_gui(self, text: str, speak: bool = True):
         if self.gui_ref:
@@ -613,6 +534,7 @@ class BehaviorScheduler:
                     self._post_gui(f"KawaiiKuro: {msg}")
             except Exception:
                 self._log_error("_reminder_loop")
+        print("Scheduler: _reminder_loop stopped.")
 
     def _get_random_idle_comment(self) -> str:
         """Returns a random, simple idle comment."""
@@ -668,6 +590,7 @@ class BehaviorScheduler:
                     self.mark_interaction() # reset idle timer
             except Exception:
                 self._log_error("_idle_loop")
+        print("Scheduler: _idle_loop stopped.")
 
     def _goal_loop(self):
         time.sleep(20)  # Initial delay to let things settle
@@ -700,6 +623,7 @@ class BehaviorScheduler:
                                     self.mark_interaction() # It's a significant interaction
             except Exception:
                 self._log_error("_goal_loop")
+        print("Scheduler: _goal_loop stopped.")
 
 
     def _system_awareness_loop(self):
@@ -722,6 +646,7 @@ class BehaviorScheduler:
                     pass # ignore transient errors
             except Exception:
                 self._log_error("_system_awareness_loop")
+        print("Scheduler: _system_awareness_loop stopped.")
 
     def _screen_awareness_loop(self):
         time.sleep(20) # Initial delay
@@ -735,6 +660,7 @@ class BehaviorScheduler:
                         self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(comment)}")
             except Exception:
                 self._log_error("_screen_awareness_loop")
+        print("Scheduler: _screen_awareness_loop stopped.")
 
     def _mood_update_loop(self):
         while not self.stop_flag.is_set():
@@ -743,6 +669,7 @@ class BehaviorScheduler:
                 self.p.update_mood()
             except Exception:
                 self._log_error("_mood_update_loop")
+        print("Scheduler: _mood_update_loop stopped.")
 
     def _auto_learn_loop(self):
         while not self.stop_flag.is_set():
@@ -836,6 +763,7 @@ class BehaviorScheduler:
                         self._post_gui(f"KawaiiKuro: *has a moment of insight, connecting some dots...*", speak=False)
             except Exception:
                 self._log_error("_auto_learn_loop")
+        print("Scheduler: _auto_learn_loop stopped.")
 
     def _auto_save_loop(self):
         while not self.stop_flag.is_set():
