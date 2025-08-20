@@ -47,6 +47,28 @@ python run_kuro.py
 The first time you run this script, it will automatically install all the required dependencies and download the necessary NLTK data. This is a one-time setup process. On subsequent launches, it will start the application directly.
 This will launch the KawaiiKuro chat window.
 
+### LLM-Powered Chat (Interactive)
+For a much more advanced and dynamic conversational experience, you can run Kuro with a local Large Language Model (LLM). This uses the `phi-2` model to generate responses, making her feel more alive and intelligent. This mode still requires you to chat with her interactively.
+
+To run this version, you first need to make sure you have the model file downloaded. If you have run the `install_dependencies.py` script, it should be present. Then, run the following command:
+```bash
+python run_kuro_llm.py
+```
+This will start the interactive chat, but with the LLM as her brain.
+
+### Fully Autonomous Mode
+In this mode, Kuro runs by herself without requiring any user interaction. She will periodically generate her own thoughts, observations, and comments based on her personality, memories, and what she can perceive from your system. You can leave this running in the background to have her "live" on your computer. Her thoughts will be printed to the console or appear in her GUI window if you run it with the graphical interface.
+
+To run Kuro in autonomous mode, use this command:
+```bash
+python run_kuro_autonomous.py
+```
+You can also run it in headless mode by adding the `--no-gui` flag:
+```bash
+python run_kuro_autonomous.py --no-gui
+```
+In this mode, her thoughts will be printed directly to your terminal.
+
 ## In-App Commands
 
 You can interact with KawaiiKuro using natural language, but she also responds to specific commands:

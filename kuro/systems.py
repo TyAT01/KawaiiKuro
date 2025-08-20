@@ -34,7 +34,7 @@ except ImportError:
 from kuro.config import (
     IDLE_THRESHOLD_SEC, AUTO_BEHAVIOR_PERIOD_SEC, JEALOUSY_CHECK_PERIOD_SEC,
     AUTO_LEARN_PERIOD_SEC, AUTO_SAVE_PERIOD_SEC, AUDIO_TIMEOUT_SEC, AUDIO_PHRASE_LIMIT_SEC,
-    KNOWN_PROCESSES, MAX_MEMORY, DREAM_PERIOD_SEC
+    KNOWN_PROCESSES, MAX_MEMORY, DREAM_PERIOD_SEC, AUTONOMOUS_THOUGHT_PERIOD_SEC
 )
 from kuro.utils import safe_word_tokenize, safe_pos_tag, safe_stopwords
 from sklearn.feature_extraction.text import CountVectorizer
@@ -275,6 +275,8 @@ class BehaviorScheduler:
         threading.Thread(target=self._screen_awareness_loop, daemon=True).start()
         if self.voice and self.voice.recognizer is not None:
             threading.Thread(target=self._continuous_listen_loop, daemon=True).start()
+        # This is the new loop for fully autonomous thought generation
+        threading.Thread(target=self._autonomous_thought_loop, daemon=True).start()
 
     def stop(self):
         print("Scheduler: Stop flag set.")
@@ -785,3 +787,22 @@ class BehaviorScheduler:
                     self._post_gui(f"You (voice): {heard}\nKawaiiKuro: {reply}")
             except Exception:
                 self._log_error("_continuous_listen_loop")
+
+    def _autonomous_thought_loop(self):
+        """A loop for generating proactive, autonomous thoughts when idle."""
+        time.sleep(30) # Initial delay
+        while not self.stop_flag.is_set():
+            period = 15 if self.test_mode else AUTONOMOUS_THOUGHT_PERIOD_SEC
+            time.sleep(period)
+            try:
+                # Only think autonomously if the user has been idle for a bit
+                # and the LLM dialogue manager is being used.
+                if (time.time() - self.last_interaction_time > self.idle_threshold) and hasattr(self.dm, 'generate_autonomous_thought'):
+                    thought = self.dm.generate_autonomous_thought()
+                    if thought:
+                        self._post_gui(f"KawaiiKuro: {thought}")
+                        # Mark interaction so other idle loops don't fire immediately
+                        self.mark_interaction()
+            except Exception:
+                self._log_error("_autonomous_thought_loop")
+        print("Scheduler: _autonomous_thought_loop stopped.")
