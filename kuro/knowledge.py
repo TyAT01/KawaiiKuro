@@ -23,6 +23,7 @@ class KnowledgeGraph:
         self.entities: Dict[str, Dict[str, Any]] = {}
         # e.g., [{'source': 'user', 'relation': 'likes', 'target': 'pizza', 'confidence': 1.0, 'source': 'stated'}]
         self.relations: List[Dict[str, Any]] = []
+        self.processed_learning_files: set[str] = set()
         self.lock = threading.Lock()
 
     def add_entity(self, name: str, entity_type: str, attributes: Dict[str, Any] = None, confidence: float = 1.0, source: str = 'stated'):
@@ -184,6 +185,20 @@ class KnowledgeGraph:
                         # Avoid common but meaningless phrases like "it is in the ..."
                         if entity_a not in ['it', 'that', 'this'] and not entity_a.startswith('the '):
                             potential_relations.append({'subject': entity_a, 'verb': 'is_in', 'object': entity_b, 'confidence': 0.75, 'type': 'location'})
+
+                    # Heuristic 10: Concept Definition for Goal Seeding (e.g., "Botany is a field of science")
+                    m_concept = re.search(r"([\w\s]+?)\s+is\s+(?:a|an)\s+(?:popular|well-known|interesting|major|)\s*(?:type of|kind of|form of|branch of|field of|study of|)\s*([\w\s]+)", sentence, re.I)
+                    if m_concept:
+                        subject_phrase = m_concept.group(1).strip().lower()
+                        object_phrase = m_concept.group(2).strip().lower()
+                        # Avoid overly generic phrases
+                        if subject_phrase not in ['it', 'this', 'that', 'he', 'she', 'the'] and object_phrase not in ['thing', 'one', 'person', 'idea']:
+                            # Simple cleanup
+                            subject_entity = subject_phrase.replace("the ", "").strip()
+                            object_entity = object_phrase.replace("the ", "").strip()
+                            if len(subject_entity.split()) <= 3 and len(object_entity.split()) <= 3: # Keep phrases reasonably short
+                                potential_relations.append({'subject': subject_entity, 'verb': 'is_a', 'object': object_entity, 'confidence': 0.7, 'type': 'definition'})
+
             except Exception:
                 pass
         return potential_relations
@@ -235,6 +250,7 @@ class KnowledgeGraph:
     def from_dict(self, data: Dict[str, Any]):
         with self.lock:
             self.entities = data.get('entities', {})
+            self.processed_learning_files = set(data.get('processed_learning_files', []))
             # Handle legacy format
             legacy_relations = data.get('relations', [])
             if legacy_relations and isinstance(legacy_relations[0], tuple):
@@ -601,3 +617,35 @@ class GoalManager:
             # For now, simple direct conversion
             self.active_goal = Goal(**active_goal_data)
         self.completed_goals = data.get('completed_goals', [])
+
+    def generate_goal_from_new_knowledge(self, relation: Dict[str, Any]):
+        """
+        Generates a new potential goal based on a newly learned relation.
+        Note: This method MUST be called with the GoalManager's lock held.
+        """
+        # Only generate goals from definitions for now
+        if relation.get('type') != 'definition':
+            return
+
+        topic = relation['subject']
+        user_name = self._get_user_name()
+        goal_id = f"ask_about_{topic.replace(' ', '_')}"
+
+        # Check if a goal for this topic already exists
+        if any(g['id'] == goal_id for g in self._potential_goals):
+            return
+
+        # Create the new goal
+        new_goal = {
+            "id": goal_id,
+            "description": f"Ask {user_name} about their thoughts on {topic}.",
+            "prerequisites": [],
+            "question_template": f"I was just reading about {topic}, and it seems really interesting. I'd love to hear your thoughts on it~",
+            "result_template": f"Thanks for telling me what you think about {topic}! I feel like I'm learning so much.",
+            "priority": 2.0,
+            "mood_affinity": {"curious": 3, "thoughtful": 2},
+            "context_keywords": [topic]
+        }
+
+        self._potential_goals.append(new_goal)
+        print(f"DEBUG: Dynamically generated new goal: {goal_id}") # For testing/verification

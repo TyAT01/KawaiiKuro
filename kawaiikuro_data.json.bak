@@ -15,7 +15,8 @@
   },
   "knowledge_graph": {
     "entities": {},
-    "relations": []
+    "relations": [],
+    "processed_learning_files": []
   },
   "goal_manager": {
     "active_goal": null,

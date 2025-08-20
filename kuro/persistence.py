@@ -85,7 +85,8 @@ class Persistence:
                 'mood_scores': self.p.mood_scores,
                 'knowledge_graph': {
                     'entities': self.kg.entities,
-                    'relations': self.kg.relations
+                    'relations': self.kg.relations,
+                    'processed_learning_files': list(self.kg.processed_learning_files)
                 },
                 'goal_manager': {
                     'active_goal': self.gm.active_goal.__dict__ if self.gm.active_goal else None,
