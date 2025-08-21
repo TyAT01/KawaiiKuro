@@ -242,13 +242,13 @@ class BehaviorScheduler:
         self.math_eval = math_eval
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
+        self.last_autonomous_action_time = 0 # NEW: Tracks Kuro's own actions
         self.stop_flag = threading.Event()
         self.already_commented_on_process = set()
         self.lock = threading.Lock()
         self.test_mode = test_mode
         self.auto_behavior_period = 1 if test_mode else AUTO_BEHAVIOR_PERIOD_SEC
         self.idle_threshold = 10 if test_mode else IDLE_THRESHOLD_SEC
-        self.last_autonomous_thought_time = 0
 
     def _log_error(self, loop_name: str):
         """Logs an exception from a scheduler loop."""
@@ -263,6 +263,10 @@ class BehaviorScheduler:
 
     def mark_interaction(self):
         self.last_interaction_time = time.time()
+
+    def mark_autonomous_action(self):
+        """NEW: Updates the timestamp for Kuro's own actions."""
+        self.last_autonomous_action_time = time.time()
 
     def start(self):
         threading.Thread(target=self._reminder_loop, daemon=True).start()
@@ -513,11 +517,10 @@ class BehaviorScheduler:
                         # Fallback if no reflection was possible
                         self._post_gui("KawaiiKuro: *is lost in thought, her gaze distant...*", speak=False)
 
-                    # We mark interaction to prevent this from firing repeatedly
-                    # until the next dream period.
-                    self.mark_interaction()
                     # A dream is a significant mental event, a good time for a follow-up thought.
                     self.trigger_autonomous_thought()
+                    # We mark the action *after* the thought has been triggered, so its own check can pass.
+                    self.mark_autonomous_action()
             except Exception:
                 self._log_error("_dream_loop")
         print("Scheduler: _dream_loop stopped.")
@@ -570,19 +573,12 @@ class BehaviorScheduler:
                         if time_greeting:
                             self._post_gui(f"KawaiiKuro: {time_greeting}")
                             time_greeting_posted = True
-                            self.mark_interaction() # Mark as interaction so we don't spam other idle messages
+                            self.mark_autonomous_action() # CHANGED
                             continue
 
-                    # Try to predict a task first, with locks
-                    with self.p.lock, self.dm.m.lock, self.kg.lock:
-                        message = self.dm.predict_task()
-
-                    if message:
-                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
-                    else:
-                        # Otherwise, use a random idle comment
-                        idle_comment = self._get_random_idle_comment()
-                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(idle_comment)}")
+                    # Post a random idle comment. The LLM thought is triggered separately.
+                    idle_comment = self._get_random_idle_comment()
+                    self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(idle_comment)}")
 
                     # Only penalize affection slightly, and less often.
                     if random.random() < 0.25:
@@ -594,7 +590,7 @@ class BehaviorScheduler:
                     # periodically attempt to have an autonomous thought, replacing the old loop.
                     self.trigger_autonomous_thought()
 
-                    self.mark_interaction() # reset idle timer
+                    self.mark_autonomous_action() # CHANGED
             except Exception:
                 self._log_error("_idle_loop")
         print("Scheduler: _idle_loop stopped.")
@@ -627,7 +623,7 @@ class BehaviorScheduler:
                                     self._post_gui(f"KawaiiKuro: {message}", speak=False)
                                 else:  # It's a real question or a result
                                     self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
-                                    self.mark_interaction() # It's a significant interaction
+                                    self.mark_autonomous_action() # CHANGED
             except Exception:
                 self._log_error("_goal_loop")
         print("Scheduler: _goal_loop stopped.")
@@ -809,8 +805,9 @@ class BehaviorScheduler:
         """
         now = time.time()
         # Cooldown period to prevent thoughts from happening too close together.
-        cooldown = 30 if self.test_mode else AUTONOMOUS_THOUGHT_PERIOD_SEC * 1.5
-        if not force and (now - self.last_autonomous_thought_time < cooldown):
+        cooldown = 30 if self.test_mode else AUTONOMOUS_THOUGHT_PERIOD_SEC
+        # CHANGED: Check against the last *autonomous action*, not just the last thought.
+        if not force and (now - self.last_autonomous_action_time < cooldown):
             return
 
         # Only think if the user is idle and we're using an LLM
@@ -819,7 +816,6 @@ class BehaviorScheduler:
                 thought = self.dm.generate_autonomous_thought()
                 if thought:
                     self._post_gui(f"KawaiiKuro: {thought}")
-                    self.mark_interaction() # Mark interaction so other idle loops don't fire immediately
-                    self.last_autonomous_thought_time = now # Update the timestamp
+                    self.mark_autonomous_action() # CHANGED: Mark as an autonomous action, not a user interaction.
             except Exception:
                 self._log_error("trigger_autonomous_thought")
