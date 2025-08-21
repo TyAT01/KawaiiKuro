@@ -3,13 +3,13 @@
 # -----------------------------
 DATA_FILE = "kawaiikuro_data.json"
 MAX_MEMORY = 200
-IDLE_THRESHOLD_SEC = 180
+IDLE_THRESHOLD_SEC = 60
 DREAM_PERIOD_SEC = 300 # How often Kuro reflects when completely idle
 AUTO_BEHAVIOR_PERIOD_SEC = 60
 JEALOUSY_CHECK_PERIOD_SEC = 300
 AUTO_LEARN_PERIOD_SEC = 1800
 AUTO_SAVE_PERIOD_SEC = 300
-AUTONOMOUS_THOUGHT_PERIOD_SEC = 120 # How often Kuro has an autonomous thought
+AUTONOMOUS_THOUGHT_PERIOD_SEC = 45 # How often Kuro has an autonomous thought
 AUDIO_TIMEOUT_SEC = 5
 AUDIO_PHRASE_LIMIT_SEC = 5
 MIN_RECALL_SIM = 0.35  # TF-IDF cosine threshold
