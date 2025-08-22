@@ -19,6 +19,7 @@ from kuro.utils import MathEvaluator
 from kuro.llm_dialogue import LLMDialogueManager
 from kuro.persistence import Persistence
 from kuro.gui import KawaiiKuroGUI
+from kuro.planner import Planner
 
 
 def handle_crash(e: Exception):
@@ -68,12 +69,16 @@ def main_autonomous():
     system_awareness = SystemAwareness()
     print("DEBUG: Initializing GoalManager...")
     gm = GoalManager(kg, memory, personality)
+    print("DEBUG: Initializing Planner...")
+    planner = Planner(kg)
     print("DEBUG: Initializing LLMDialogueManager...")
-    dialogue = LLMDialogueManager(personality, memory, kg)
+    dialogue = LLMDialogueManager(personality, memory, kg, planner)
+    print("DEBUG: Linking Planner and LLM Dialogue Manager...")
+    planner.set_llm_manager(dialogue)
     print("DEBUG: Initializing VoiceIO...")
     voice = VoiceIO(rate=140, enabled=not args.no_voice)
     print("DEBUG: Initializing Persistence...")
-    persistence = Persistence(personality, dialogue, memory, reminders, kg, gm)
+    persistence = Persistence(personality, dialogue, memory, reminders, kg, gm, planner)
     print("DEBUG: Initialized Persistence.")
 
     # Load persistence
@@ -86,6 +91,7 @@ def main_autonomous():
     kg.from_dict(state.get('knowledge_graph', {}))
     memory.from_list(state.get('memory', []))
     gm.from_dict(state.get('goal_manager'))
+    planner.from_dict(state.get('planner'))
 
 
     if not args.no_gui:
@@ -93,7 +99,7 @@ def main_autonomous():
         scheduler = BehaviorScheduler(
             voice=voice, dialogue=dialogue, personality=personality, reminders=reminders,
             system=system_awareness, gui_ref=lambda text: gui.thread_safe_post(text),
-            kg=kg, goal_manager=gm, persistence=persistence, math_eval=math_eval,
+            kg=kg, goal_manager=gm, persistence=persistence, math_eval=math_eval, planner=planner,
         )
         scheduler.start()
 
@@ -118,7 +124,7 @@ def main_autonomous():
         scheduler = BehaviorScheduler(
             voice=voice, dialogue=dialogue, personality=personality, reminders=reminders,
             system=system_awareness, gui_ref=headless_post,
-            kg=kg, goal_manager=gm, persistence=persistence, math_eval=math_eval,
+            kg=kg, goal_manager=gm, persistence=persistence, math_eval=math_eval, planner=planner,
         )
         scheduler.start()
 

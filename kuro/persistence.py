@@ -23,6 +23,9 @@ class KnowledgeGraph:
 class GoalManager:
     pass
 
+class Planner:
+    pass
+
 class Persistence:
     def __init__(
         self,
@@ -32,6 +35,7 @@ class Persistence:
         reminders: ReminderManager,
         knowledge_graph: KnowledgeGraph,
         goal_manager: GoalManager,
+        planner: Planner,
     ):
         self.p = personality
         self.dm = dialogue
@@ -39,6 +43,7 @@ class Persistence:
         self.r = reminders
         self.kg = knowledge_graph
         self.gm = goal_manager
+        self.planner = planner
 
     def load(self) -> Dict[str, Any]:
         bak_file = f"{DATA_FILE}.bak"
@@ -72,8 +77,9 @@ class Persistence:
     def save(self):
         # Enforce a global lock order to prevent deadlocks.
         # This is the single place where all data is gathered for saving.
-        with self.p.lock, self.m.lock, self.kg.lock, self.gm.lock, self.dm.lock, self.r.lock:
+        with self.p.lock, self.m.lock, self.kg.lock, self.gm.lock, self.planner.lock, self.dm.lock, self.r.lock:
             data = {
+                'planner': self.planner.to_dict(),
                 'affection_score': self.p.affection_score,
                 'spicy_mode': self.p.spicy_mode,
                 'relationship_status': self.p.relationship_status,

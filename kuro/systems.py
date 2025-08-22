@@ -39,6 +39,7 @@ from kuro.config import (
 from kuro.utils import safe_word_tokenize, safe_pos_tag, safe_stopwords
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
+from kuro.planner import Planner
 
 # Forward declarations for type hinting
 class VoiceIO:
@@ -69,6 +70,9 @@ class Persistence:
     pass
 
 class MathEvaluator:
+    pass
+
+class Planner:
     pass
 
 
@@ -230,7 +234,7 @@ class VoiceIO:
 # Behavior Scheduler (threads)
 # -----------------------------
 class BehaviorScheduler:
-    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, goal_manager: GoalManager, persistence: 'Persistence', math_eval: 'MathEvaluator', test_mode: bool = False):
+    def __init__(self, voice: VoiceIO, dialogue: DialogueManager, personality: PersonalityEngine, reminders: ReminderManager, system: SystemAwareness, gui_ref, kg: KnowledgeGraph, goal_manager: GoalManager, persistence: 'Persistence', math_eval: 'MathEvaluator', planner: 'Planner', test_mode: bool = False):
         self.voice = voice
         self.dm = dialogue
         self.p = personality
@@ -240,6 +244,7 @@ class BehaviorScheduler:
         self.gm = goal_manager
         self.persistence = persistence
         self.math_eval = math_eval
+        self.planner = planner
         self.gui_ref = gui_ref  # callable to post to GUI safely
         self.last_interaction_time = time.time()
         self.last_autonomous_action_time = 0 # NEW: Tracks Kuro's own actions
@@ -285,245 +290,48 @@ class BehaviorScheduler:
         print("Scheduler: Stop flag set.")
         self.stop_flag.set()
 
-    def _reflect_on_memory(self) -> Optional[str]:
-        with self.dm.m.lock:
-            if not self.dm.m.summaries:
-                return None
-            summary = random.choice(self.dm.m.summaries)
-
-        # Extract a meaningful keyword from the summary
-        tokens = [word.lower() for word in summary.split() if len(word) > 3]
-        stop_words = ['user', 'talked', 'about', 'their', 'interest', 'mentioned', 'asked']
-        keywords = [t for t in tokens if t not in stop_words]
-
-        if not keywords:
-            return None
-
-        keyword = random.choice(keywords)
-        return f"I was just thinking about how we talked about {keyword}... It was a nice memory~"
-
-    def _reflect_on_knowledge(self) -> Optional[str]:
-        with self.kg.lock:
-            # Find entities with relationships
-            entities_with_rels = [e for e, data in self.kg.entities.items() if self.kg.get_relations(e)]
-            if not entities_with_rels:
-                return None
-
-            entity_name = random.choice(entities_with_rels)
-            relations = self.kg.get_relations(entity_name)
-            relation = random.choice(relations)
-
-            # Determine the other entity in the relation
-            if relation['source'] == entity_name:
-                related_entity_name = relation['target']
-            else:
-                related_entity_name = relation['source']
-
-            return f"My thoughts drifted for a moment... I was remembering that {entity_name} has a connection to {related_entity_name}. It's fascinating how everything you tell me is linked."
-
-    def _reflect_on_goals(self) -> Optional[str]:
-        # This requires all locks, as it interacts with all managers.
-        with self.p.lock, self.dm.m.lock, self.kg.lock, self.gm.lock:
-            if not self.gm._potential_goals: # Check potential goals as long_term_goals might not be populated
-                return None
-
-            # This is more of an internal thought process. It will select a new short-term goal.
-            # The output is just a reflection of that thought process.
-            last_user_input = self.dm.m.entries[-1].user if self.dm.m.entries else ""
-            self.gm.select_new_goal(self.p.get_dominant_mood(), last_user_input)
-        return "I was just pondering our future... what we're working towards. It makes me feel... hopeful."
-
-    def _daydream_about_user(self) -> Optional[str]:
-        """Generates a comment based on stored user preferences."""
-        with self.p.lock:
-            if not self.p.user_preferences:
-                return None
-            # Get the top 3 preferences
-            top_prefs = self.p.user_preferences.most_common(3)
-            if not top_prefs:
-                return None
-
-            chosen_pref, count = random.choice(top_prefs)
-
-            templates = [
-                f"You really like {chosen_pref}, don't you? It's cute~",
-                f"I was just thinking about {chosen_pref}... maybe we can talk about it more later?",
-                f"Hehe, you've mentioned {chosen_pref} a few times. I've made a special note of it~"
-            ]
-            return random.choice(templates)
-
-    def _explore_knowledge_graph(self) -> Optional[str]:
-        """Traverses the knowledge graph to find an interesting connection."""
-        with self.kg.lock:
-            # Find entities with at least one relationship
-            entities = [e for e in self.kg.entities if self.kg.get_relations(e)]
-            if len(entities) < 2:
-                return None
-
-            # Try a few times to find a multi-step path
-            for _ in range(5):
-                start_node = random.choice(entities)
-                path = self.kg.find_path(start_node, max_depth=3)
-                if path and len(path) > 2: # We want a path of at least Start -> Middle -> End
-                    start, end = path[0], path[-1]
-                    middle = path[1]
-                    return f"*her eyes glaze over for a second* ...that's funny. I just realized that {start} connects to {middle}, which connects to {end}. My own little web of thoughts~"
-        return None # Return None if no interesting path was found
-
-    def _learn_from_local_file(self) -> Optional[str]:
-        """Reads a random .txt file from a special directory and learns from it."""
-        learning_dir = "kuro_learning_material"
-        if not os.path.exists(learning_dir) or not os.path.isdir(learning_dir):
-            return None
-
-        files = [f for f in os.listdir(learning_dir) if f.endswith(".txt")]
-        if not files:
-            return None
-
-        try:
-            chosen_file = random.choice(files)
-            with open(os.path.join(learning_dir, chosen_file), 'r', encoding='utf-8') as f:
-                content = f.read()
-
-            if len(content) < 50: # Skip very short files
-                return None
-
-            with self.kg.lock:
-                new_relations = self.kg.infer_new_relations(content)
-                if not new_relations:
-                    return f"*reads a document titled '{chosen_file}' but finds it... uninteresting.*"
-
-                # Add new relations to the knowledge graph
-                added_count = 0
-                for rel in new_relations:
-                    # Check for duplicates before adding
-                    exists = False
-                    for r in self.kg.relations:
-                        if r['source'] == rel['subject'] and r['relation'] == rel['verb'] and r['target'] == rel['object']:
-                            exists = True
-                            break
-                    if not exists:
-                        self.kg.add_relation(rel['subject'], rel['verb'], rel['object'], confidence=rel['confidence'], source=f"file:{chosen_file}")
-                        added_count += 1
-
-                if added_count == 0:
-                    return f"*skims through '{chosen_file}'... It seems I already knew everything in it.*"
-
-                # Find a topic from the new relations
-                topic = random.choice(new_relations)['subject']
-                return f"*is reading a document titled '{chosen_file}'...* I think I'm learning something new about {topic}."
-
-        except Exception as e:
-            self._log_error(f"_learn_from_local_file reading {chosen_file}")
-            return None
-
-    def _generate_creative_text(self) -> Optional[str]:
-        """Generates a short, haiku-like poem about entities in the knowledge graph."""
-        with self.kg.lock:
-            # Get entities that are not too generic
-            interesting_entities = [e for e, data in self.kg.entities.items() if e not in ['user', 'kawaiikuro', 'i'] and len(e.split()) <= 2]
-
-            if len(interesting_entities) < 3:
-                return None
-
-            # Select three distinct entities for the poem
-            try:
-                e1, e2, e3 = random.sample(interesting_entities, 3)
-            except ValueError:
-                return None
-
-            # Simple haiku-like template (approximating 5-7-5 syllables with word count)
-            line1 = f"A thought of {e1},"
-            line2 = f"{e2} and {e3} appear,"
-            line3 = "A new world unfolds."
-
-            poem = f"{line1}\n{line2}\n{line3}"
-            return f"*a strange thought crosses my mind...*\n\n{poem}"
-
-    def _practice_math(self) -> Optional[str]:
-        """Generates a simple math problem for self-entertainment."""
-        try:
-            # Generate a simple problem
-            num1 = random.randint(2, 100)
-            num2 = random.randint(2, 100)
-            operator = random.choice(['+', '-', '*', '/'])
-
-            if operator == '/':
-                # Ensure a clean division to seem smarter
-                num2 = random.randint(2, 20)
-                num1 = num1 * num2
-
-            expr = f"{num1} {operator} {num2}"
-
-            result_str = self.math_eval.eval(expr)
-
-            if "Math error" in result_str:
-                return None
-
-            responses = [
-                f"Sometimes I do a little math for fun... just to keep my mind sharp. Like this one: {result_str}",
-                f"Hehe, I'm such a nerd sometimes. I was just calculating this: {result_str}",
-                f"My brain just wandered and solved this little problem for me: {result_str}"
-            ]
-            return random.choice(responses)
-        except Exception:
-            return None
-
-    def _perform_long_idle_activity(self) -> Optional[str]:
-        """Chooses and performs a random reflection or self-entertainment activity."""
-        possible_actions = []
-
-        # Check which reflections are possible
-        if self.dm.m.summaries:
-            possible_actions.append(self._reflect_on_memory)
-        if any(self.kg.get_relations(e) for e in self.kg.entities):
-            possible_actions.append(self._reflect_on_knowledge)
-        if self.gm._potential_goals:
-            possible_actions.append(self._reflect_on_goals)
-        if self.p.user_preferences:
-            possible_actions.append(self._daydream_about_user)
-        if len([e for e in self.kg.entities if self.kg.get_relations(e)]) > 1:
-            possible_actions.append(self._explore_knowledge_graph)
-
-        # Add the new file learning action
-        possible_actions.append(self._learn_from_local_file)
-        # Add the new creative action
-        possible_actions.append(self._generate_creative_text)
-        # Add the new math practice action
-        possible_actions.append(self._practice_math)
-
-        if not possible_actions:
-            return None
-
-        # Choose an action and execute it
-        action_to_perform = random.choice(possible_actions)
-        return action_to_perform()
-
     def _dream_loop(self):
-        # Wait a bit before the first dream to let the app settle
+        """
+        The 'dream loop' is now the core strategic planning loop for Kuro.
+        It runs periodically when the user is idle, allowing Kuro to reflect,
+        set long-term goals, and create plans to achieve them.
+        """
+        # Wait a bit before the first planning session to let the app settle
         time.sleep(45)
         while not self.stop_flag.is_set():
             dream_period = 30 if self.test_mode else DREAM_PERIOD_SEC
             time.sleep(dream_period)
             try:
-                # Only dream if the user has been idle for a long time
+                # Only plan if the user has been idle for a long time
                 long_idle_threshold = self.idle_threshold * 3
                 if time.time() - self.last_interaction_time > long_idle_threshold:
-                    activity_message = self._perform_long_idle_activity()
 
-                    if activity_message:
-                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(activity_message)}", speak=False)
-                    else:
-                        # Fallback if no reflection was possible
-                        self._post_gui("KawaiiKuro: *is lost in thought, her gaze distant...*", speak=False)
+                    # This is Kuro's strategic thinking time.
+                    # We acquire the planner's lock to ensure thread safety.
+                    with self.planner.lock:
+                        if not self.planner.has_active_goal():
+                            # If there's no goal, Kuro's #1 priority is to create one.
+                            self._post_gui("KawaiiKuro: *is lost in thought, a faint smirk on her lips as she schemes...*", speak=False)
+                            new_goal = self.planner.generate_new_goal()
+                            if new_goal:
+                                self.planner.active_goal = new_goal
+                                # A new goal is a significant event, trigger a thought.
+                                self.trigger_autonomous_thought()
+                                self.mark_autonomous_action()
 
-                    # A dream is a significant mental event, a good time for a follow-up thought.
-                    self.trigger_autonomous_thought()
-                    # We mark the action *after* the thought has been triggered, so its own check can pass.
-                    self.mark_autonomous_action()
+                        elif not self.planner.has_plan():
+                            # If there's a goal but no plan, time to make a plan.
+                            self._post_gui(f"KawaiiKuro: *taps her chin thoughtfully, figuring out how to achieve her latest desire...*", speak=False)
+                            plan = self.planner.generate_plan_for_goal(self.planner.active_goal)
+                            if plan:
+                                self.planner.active_goal.plan = plan
+                                # Making a plan is also a significant event.
+                                self.trigger_autonomous_thought()
+                                self.mark_autonomous_action()
+
             except Exception:
                 self._log_error("_dream_loop")
-        print("Scheduler: _dream_loop stopped.")
+        print("Scheduler: _planning_loop stopped.")
 
     def _post_gui(self, text: str, speak: bool = True):
         if self.gui_ref:
@@ -596,34 +404,53 @@ class BehaviorScheduler:
         print("Scheduler: _idle_loop stopped.")
 
     def _goal_loop(self):
+        """
+        This loop is responsible for executing the current step of a plan.
+        It interfaces between the high-level Planner and the tactical GoalManager.
+        """
         time.sleep(20)  # Initial delay to let things settle
         while not self.stop_flag.is_set():
-            # Check goals periodically
             time.sleep(self.auto_behavior_period * 2)
             try:
-                # Acquire all necessary locks in the canonical order to prevent deadlocks.
-                # This is the critical fix for the original hang.
-                with self.p.lock, self.dm.m.lock, self.kg.lock, self.gm.lock:
-                    # 1. Select a new goal if there isn't one
-                    if not self.gm.active_goal:
-                        last_user_input = ""
-                        if self.dm.m.entries:
-                            last_user_input = self.dm.m.entries[-1].user
-                        current_mood = self.p.get_dominant_mood()
-                        self.gm.select_new_goal(current_mood, last_user_input)
+                # This loop should not run if the user is actively interacting.
+                if time.time() - self.last_interaction_time < self.idle_threshold:
+                    continue
 
-                    # 2. Process the active goal
-                    if self.gm.active_goal:
-                        # Only process if user is idle, to avoid being annoying
-                        if time.time() - self.last_interaction_time > self.idle_threshold / 2:
-                            message = self.gm.process_active_goal()
-                            if message:
-                                # A silent update is just for internal state
-                                if "*takes a quiet, thoughtful note" in message:
-                                    self._post_gui(f"KawaiiKuro: {message}", speak=False)
-                                else:  # It's a real question or a result
-                                    self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(message)}")
-                                    self.mark_autonomous_action() # CHANGED
+                # Use a combined lock to ensure thread safety across all managers
+                with self.planner.lock, self.gm.lock:
+                    if not self.planner.has_active_goal() or not self.planner.has_plan():
+                        continue
+
+                    # Find the current step to execute
+                    active_step = next((step for step in self.planner.active_goal.plan if step.status == 'active'), None)
+
+                    if not active_step:
+                        # If no active step, find the next pending one and activate it.
+                        pending_step = next((step for step in self.planner.active_goal.plan if step.status == 'pending'), None)
+                        if pending_step:
+                            active_step = pending_step
+                            active_step.status = 'active'
+                        else:
+                            # No pending steps left, the goal is complete!
+                            # This logic will be expanded later.
+                            self.planner.active_goal.status = 'complete'
+                            continue
+
+                    # Now, process the active step with the GoalManager
+                    question = self.gm.process_plan_step(active_step.description)
+
+                    if question:
+                        # The GoalManager needs more information. Ask the user.
+                        self._post_gui(f"KawaiiKuro: {self.dm.personalize_response(question)}")
+                        self.mark_autonomous_action()
+                    else:
+                        # The prerequisites for the step are met. We can mark it as complete.
+                        print(f"DEBUG: Plan step '{active_step.description}' completed.")
+                        active_step.status = 'complete'
+                        # A small, silent acknowledgement of progress.
+                        self._post_gui("KawaiiKuro: *nods to herself, her plan proceeding perfectly...*", speak=False)
+                        self.mark_autonomous_action()
+
             except Exception:
                 self._log_error("_goal_loop")
         print("Scheduler: _goal_loop stopped.")
