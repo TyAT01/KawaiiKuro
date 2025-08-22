@@ -1,4 +1,5 @@
 import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 
@@ -72,7 +73,7 @@ class Planner:
 
         # Create a new LongTermGoal object
         new_goal = LongTermGoal(
-            id=f"goal_{int(threading.active_count())}_{int(self.kg.lock.locked())}", # simple unique enough id
+            id=f"goal_{str(uuid.uuid4())}",
             description=goal_text
         )
         return new_goal

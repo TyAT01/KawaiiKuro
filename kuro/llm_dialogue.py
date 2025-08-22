@@ -310,6 +310,13 @@ Plan:
             print(f"Error during planner text generation: {e}")
             return ""
 
+    def personalize_response(self, response: str) -> str:
+        """
+        The LLM already personalizes the response based on the prompt.
+        This method is here for compatibility with BehaviorScheduler.
+        """
+        return response
+
     def add_memory(self, user_text: str, response: str, affection_change: int = 0, is_fact_learning: bool = False):
         from .memory import MemoryEntry
         from datetime import datetime
