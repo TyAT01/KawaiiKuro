@@ -141,6 +141,18 @@ Current situation:
 - Your Relationship Status: {self.p.relationship_status}
 - Your Current Outfit: {self.p.get_current_outfit()}
 """
+        # Add the current plan to the prompt context if it exists
+        plan_context = ""
+        with self.planner.lock:
+            if self.planner.has_active_goal():
+                plan_context += "\nMy Current Goal:\n"
+                plan_context += f"- Goal: {self.planner.active_goal.description}\n"
+                active_step = next((step for step in self.planner.active_goal.plan if step.status == 'active'), None)
+                if active_step:
+                    plan_context += f"- Current Step: {active_step.description}\n"
+
+        system_prompt += plan_context
+
         history = self.m.to_list(limit=8)
         conversation_history = ""
         for entry in reversed(history):
